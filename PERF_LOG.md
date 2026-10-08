@@ -1296,3 +1296,238 @@ full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.84130
 chunks 60 x 2048 eps 5e-03: full requant 191.64 ms cos 0.999400 min 0.944326 | incremental 174.42 ms cos 0.999198 min 0.822568
 stale-cache redo vs fresh prefill: cos 1.000000
 ```
+
+## 2026-10-08 Phase 4 incremental tile cache (APA_FULL=1, eps 0.005), main afd12bb + KV_RESTAT / DBG_KMEAN
+
+Builds (NVFLAGS): p3_hrN = `-DAPA_KV_HEADROOM=N.f` (restat 2), p4_hr3, p4_restatR / p5_rR = `-DAPA_KV_RESTAT=R`,
+p6_kmL = `-DAPA_DBG_KMEAN_LEN=L`, p6_kfF = `-DAPA_DBG_KMEAN_FROM=F`, p6_def / p7_def = default (p7: KV_RESTAT 1.125).
+`chunks_<dump>_<build>`: APA_CHUNKS=1 or 2 (p5, p7). `kv120832_<dump>_<build>`: APA_KV=120832. Filter:
+`grep -E "^full|  full|^chunks"`, verbatim.
+
+```
+### chunks_lc_122880_0_p3_hr1.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999312 mean cos 0.998405 min 0.925085 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.28 ms cos 0.999484 min 0.969733 | incremental 180.78 ms cos 0.999338 min 0.975069
+### chunks_lc_122880_0_p3_hr2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999312 mean cos 0.998405 min 0.925085 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.58 ms cos 0.999484 min 0.969733 | incremental 181.09 ms cos 0.999338 min 0.975069
+### chunks_lc_122880_0_p3_hr4.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999312 mean cos 0.998405 min 0.925085 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.45 ms cos 0.999484 min 0.969733 | incremental 180.92 ms cos 0.999338 min 0.975069
+### chunks_lc_122880_1_p3_hr1.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999788 mean cos 0.999681 min 0.974581 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.13 ms cos 0.999791 min 0.997192 | incremental 190.86 ms cos 0.999769 min 0.993415
+### chunks_lc_122880_1_p3_hr2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999788 mean cos 0.999681 min 0.974581 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.42 ms cos 0.999791 min 0.997192 | incremental 191.04 ms cos 0.999769 min 0.993415
+### chunks_lc_122880_1_p3_hr4.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999788 mean cos 0.999681 min 0.974581 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.59 ms cos 0.999791 min 0.997192 | incremental 191.36 ms cos 0.999769 min 0.993415
+### chunks_lc_122880_2_p3_hr1.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999193 mean cos 0.996183 min 0.679235 cos<0.9 275 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 195.89 ms cos 0.999400 min 0.944326 | incremental 178.60 ms cos 0.999198 min 0.822568
+### chunks_lc_122880_2_p3_hr2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999193 mean cos 0.996183 min 0.679235 cos<0.9 275 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.40 ms cos 0.999400 min 0.944326 | incremental 178.65 ms cos 0.999198 min 0.822568
+### chunks_lc_122880_2_p3_hr4.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999193 mean cos 0.996183 min 0.679235 cos<0.9 275 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.75 ms cos 0.999400 min 0.944326 | incremental 178.57 ms cos 0.999198 min 0.822568
+### chunks_lc_122880_0_p4_hr3.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999335 mean cos 0.998386 min 0.925169 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.78 ms cos 0.999484 min 0.969733 | incremental 183.13 ms cos 0.999378 min 0.973066
+### chunks_lc_122880_0_p4_restat125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 199.90 ms cos 0.999484 min 0.969733 | incremental 184.56 ms cos 0.999484 min 0.969733
+### chunks_lc_122880_0_p4_restat15.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999346 mean cos 0.998401 min 0.946821 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 200.43 ms cos 0.999484 min 0.969733 | incremental 182.42 ms cos 0.999383 min 0.972102
+### chunks_lc_122880_0_p4_restat1.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 199.65 ms cos 0.999484 min 0.969733 | incremental 200.74 ms cos 0.999484 min 0.969733
+### chunks_lc_122880_2_p4_hr3.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999119 mean cos 0.995998 min 0.690144 cos<0.9 254 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.89 ms cos 0.999400 min 0.944326 | incremental 177.33 ms cos 0.999154 min 0.826473
+### chunks_lc_122880_2_p4_restat125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.25 ms cos 0.999400 min 0.944326 | incremental 182.51 ms cos 0.999400 min 0.944326
+### chunks_lc_122880_2_p4_restat15.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999255 mean cos 0.996915 min 0.745347 cos<0.9 130 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 197.78 ms cos 0.999400 min 0.944326 | incremental 181.44 ms cos 0.999269 min 0.876994
+### chunks_lc_122880_2_p4_restat1.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 197.40 ms cos 0.999400 min 0.944326 | incremental 199.14 ms cos 0.999400 min 0.944326
+### chunks_lc_122880_0_p5_r1125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999432 mean cos 0.998458 min 0.956914 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.71 ms cos 0.999484 min 0.969733 | incremental 186.59 ms cos 0.999457 min 0.969312
+chunks incr vs requant: worst min cos 0.986219 (chunk 20), max cos<0.99 2, max cos<0.9 0
+### chunks_lc_122880_0_p5_r125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.76 ms cos 0.999484 min 0.969733 | incremental 183.79 ms cos 0.999484 min 0.969733
+chunks incr vs requant: worst min cos 0.987198 (chunk 20), max cos<0.99 2, max cos<0.9 0
+### chunks_lc_122880_0_p5_r15.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999346 mean cos 0.998401 min 0.946821 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.71 ms cos 0.999484 min 0.969733 | incremental 182.26 ms cos 0.999383 min 0.972102
+chunks incr vs requant: worst min cos 0.984540 (chunk 59), max cos<0.99 5, max cos<0.9 0
+### chunks_lc_122880_0_p5_r2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999312 mean cos 0.998405 min 0.925085 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.29 ms cos 0.999484 min 0.969733 | incremental 180.87 ms cos 0.999338 min 0.975069
+chunks incr vs requant: worst min cos 0.975952 (chunk 59), max cos<0.99 33, max cos<0.9 0
+### chunks_lc_122880_1_p5_r1125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999803 mean cos 0.999715 min 0.973859 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.63 ms cos 0.999791 min 0.997192 | incremental 195.83 ms cos 0.999789 min 0.997316
+chunks incr vs requant: worst min cos 0.968561 (chunk 11), max cos<0.99 6, max cos<0.9 0
+### chunks_lc_122880_1_p5_r125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.73 ms cos 0.999791 min 0.997192 | incremental 194.45 ms cos 0.999791 min 0.997192
+chunks incr vs requant: worst min cos 0.972819 (chunk 9), max cos<0.99 6, max cos<0.9 0
+### chunks_lc_122880_1_p5_r15.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999793 mean cos 0.999692 min 0.971330 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.61 ms cos 0.999791 min 0.997192 | incremental 193.02 ms cos 0.999774 min 0.994817
+chunks incr vs requant: worst min cos 0.972178 (chunk 9), max cos<0.99 9, max cos<0.9 0
+### chunks_lc_122880_1_p5_r2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999788 mean cos 0.999681 min 0.974581 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.63 ms cos 0.999791 min 0.997192 | incremental 191.74 ms cos 0.999769 min 0.993415
+chunks incr vs requant: worst min cos 0.937497 (chunk 2), max cos<0.99 10, max cos<0.9 0
+### chunks_lc_122880_2_p5_r1125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999389 mean cos 0.998312 min 0.829814 cos<0.9 17 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.59 ms cos 0.999400 min 0.944326 | incremental 182.88 ms cos 0.999394 min 0.938871
+chunks incr vs requant: worst min cos 0.875891 (chunk 15), max cos<0.99 29, max cos<0.9 1
+### chunks_lc_122880_2_p5_r125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.76 ms cos 0.999400 min 0.944326 | incremental 180.99 ms cos 0.999400 min 0.944326
+chunks incr vs requant: worst min cos 0.861981 (chunk 13), max cos<0.99 59, max cos<0.9 1
+### chunks_lc_122880_2_p5_r15.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999255 mean cos 0.996915 min 0.745347 cos<0.9 130 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 197.02 ms cos 0.999400 min 0.944326 | incremental 179.98 ms cos 0.999269 min 0.876994
+chunks incr vs requant: worst min cos 0.851418 (chunk 14), max cos<0.99 610, max cos<0.9 2
+### chunks_lc_122880_2_p5_r2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999193 mean cos 0.996183 min 0.679235 cos<0.9 275 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.47 ms cos 0.999400 min 0.944326 | incremental 178.32 ms cos 0.999198 min 0.822568
+chunks incr vs requant: worst min cos 0.845188 (chunk 14), max cos<0.99 1452, max cos<0.9 2
+### chunks_lc_122880_0_p7_def.log
+full eps    5e-03: pairs 49152 pooled cos 0.999459 mean cos 0.998512 min 0.959676 | cos<0.99 1611 cos<0.9 0 cos<0 0 | relL2 mean 0.04631 p50 0.03381 p99 0.20390 p999 0.29850 max 0.50019
+  full full requant: pooled cos 0.999459 mean cos 0.998512 min 0.959676 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999432 mean cos 0.998458 min 0.956914 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 198.11 ms cos 0.999484 min 0.969733 | incremental 186.23 ms cos 0.999457 min 0.969312
+chunks incr vs requant: worst min cos 0.986219 (chunk 20), max cos<0.99 2, max cos<0.9 0
+### chunks_lc_122880_1_p7_def.log
+full eps    5e-03: pairs 49152 pooled cos 0.999805 mean cos 0.999717 min 0.975775 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02142 p50 0.01872 p99 0.07027 p999 0.11737 max 0.26819
+  full full requant: pooled cos 0.999805 mean cos 0.999717 min 0.975775 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999803 mean cos 0.999715 min 0.973859 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 208.43 ms cos 0.999791 min 0.997192 | incremental 195.69 ms cos 0.999789 min 0.997316
+chunks incr vs requant: worst min cos 0.968561 (chunk 11), max cos<0.99 6, max cos<0.9 0
+### chunks_lc_122880_2_p7_def.log
+full eps    5e-03: pairs 49152 pooled cos 0.999393 mean cos 0.998438 min 0.841302 | cos<0.99 1145 cos<0.9 14 cos<0 0 | relL2 mean 0.05016 p50 0.03856 p99 0.24802 p999 0.40345 max 0.54276
+  full full requant: pooled cos 0.999393 mean cos 0.998438 min 0.841302 cos<0.9 14 cos<0 0
+  full incremental: pooled cos 0.999389 mean cos 0.998312 min 0.829814 cos<0.9 17 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.16 ms cos 0.999400 min 0.944326 | incremental 182.68 ms cos 0.999394 min 0.938871
+chunks incr vs requant: worst min cos 0.875891 (chunk 15), max cos<0.99 29, max cos<0.9 1
+### kv120832_lc_122880_0_p5_r125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999382 mean cos 0.998792 min 0.961309 | cos<0.99 1142 cos<0.9 0 cos<0 0 | relL2 mean 0.04105 p50 0.02866 p99 0.18672 p999 0.24530 max 0.30213
+  full full requant: pooled cos 0.999382 mean cos 0.998792 min 0.961309 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999323 mean cos 0.998645 min 0.954930 cos<0.9 0 cos<0 0
+chunks 59 x 2048 eps 5e-03: full requant 194.15 ms cos 0.999484 min 0.971557 | incremental 178.81 ms cos 0.999428 min 0.966222
+### kv120832_lc_122880_0_p5_r2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999382 mean cos 0.998792 min 0.961309 | cos<0.99 1142 cos<0.9 0 cos<0 0 | relL2 mean 0.04105 p50 0.02866 p99 0.18672 p999 0.24530 max 0.30213
+  full full requant: pooled cos 0.999382 mean cos 0.998792 min 0.961309 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999273 mean cos 0.998759 min 0.966430 cos<0.9 0 cos<0 0
+chunks 59 x 2048 eps 5e-03: full requant 193.68 ms cos 0.999484 min 0.971557 | incremental 176.18 ms cos 0.999372 min 0.974766
+### kv120832_lc_122880_0_p6_kf110592.log
+full eps    5e-03: pairs 49152 pooled cos 0.999264 mean cos 0.998731 min 0.956108 | cos<0.99 1352 cos<0.9 0 cos<0 0 | relL2 mean 0.04337 p50 0.03085 p99 0.19491 p999 0.25331 max 0.32195
+### kv120832_lc_122880_0_p6_kf4096.log
+full eps    5e-03: pairs 49152 pooled cos 0.999384 mean cos 0.998781 min 0.960472 | cos<0.99 1189 cos<0.9 0 cos<0 0 | relL2 mean 0.04111 p50 0.02871 p99 0.18888 p999 0.24836 max 0.30822
+### kv120832_lc_122880_0_p6_kf60416.log
+full eps    5e-03: pairs 49152 pooled cos 0.999342 mean cos 0.998534 min 0.941675 | cos<0.99 2124 cos<0.9 0 cos<0 0 | relL2 mean 0.04405 p50 0.03032 p99 0.22899 p999 0.29639 max 0.37103
+### kv120832_lc_122880_0_p6_km108544.log
+full eps    5e-03: pairs 49152 pooled cos 0.999370 mean cos 0.998720 min 0.958323 | cos<0.99 1438 cos<0.9 0 cos<0 0 | relL2 mean 0.04212 p50 0.02958 p99 0.19607 p999 0.25317 max 0.31155
+### kv120832_lc_122880_0_p6_km65536.log
+full eps    5e-03: pairs 49152 pooled cos 0.999273 mean cos 0.998759 min 0.966430 | cos<0.99 1046 cos<0.9 0 cos<0 0 | relL2 mean 0.04284 p50 0.03058 p99 0.17696 p999 0.22938 max 0.28703
+### kv120832_lc_122880_0_p6_km81920.log
+full eps    5e-03: pairs 49152 pooled cos 0.999310 mean cos 0.998774 min 0.963320 | cos<0.99 1053 cos<0.9 0 cos<0 0 | relL2 mean 0.04233 p50 0.03014 p99 0.18088 p999 0.23409 max 0.29460
+### kv120832_lc_122880_0_p6_km98304.log
+full eps    5e-03: pairs 49152 pooled cos 0.999322 mean cos 0.998644 min 0.954930 | cos<0.99 1675 cos<0.9 0 cos<0 0 | relL2 mean 0.04322 p50 0.03014 p99 0.21188 p999 0.26831 max 0.31933
+### kv120832_lc_122880_2_p5_r125.log
+full eps    5e-03: pairs 49152 pooled cos 0.999247 mean cos 0.997855 min 0.755756 | cos<0.99 1793 cos<0.9 24 cos<0 0 | relL2 mean 0.06026 p50 0.04572 p99 0.27066 p999 0.45461 max 0.71070
+  full full requant: pooled cos 0.999247 mean cos 0.997855 min 0.755756 cos<0.9 24 cos<0 0
+  full incremental: pooled cos 0.999124 mean cos 0.996743 min 0.709508 cos<0.9 104 cos<0 0
+chunks 59 x 2048 eps 5e-03: full requant 191.12 ms cos 0.999286 min 0.920899 | incremental 175.60 ms cos 0.999159 min 0.884139
+### kv120832_lc_122880_2_p5_r2.log
+full eps    5e-03: pairs 49152 pooled cos 0.999247 mean cos 0.997855 min 0.755756 | cos<0.99 1793 cos<0.9 24 cos<0 0 | relL2 mean 0.06026 p50 0.04572 p99 0.27066 p999 0.45461 max 0.71070
+  full full requant: pooled cos 0.999247 mean cos 0.997855 min 0.755756 cos<0.9 24 cos<0 0
+  full incremental: pooled cos 0.998952 mean cos 0.994692 min 0.559054 cos<0.9 430 cos<0 0
+chunks 59 x 2048 eps 5e-03: full requant 190.97 ms cos 0.999286 min 0.920899 | incremental 174.31 ms cos 0.998987 min 0.811953
+### kv120832_lc_122880_2_p6_def.log
+full eps    5e-03: pairs 49152 pooled cos 0.999247 mean cos 0.997855 min 0.755756 | cos<0.99 1793 cos<0.9 24 cos<0 0 | relL2 mean 0.06026 p50 0.04572 p99 0.27066 p999 0.45461 max 0.71070
+### kv120832_lc_122880_2_p6_kf110592.log
+full eps    5e-03: pairs 49152 pooled cos 0.999274 mean cos 0.997934 min 0.872878 | cos<0.99 1926 cos<0.9 10 cos<0 0 | relL2 mean 0.05865 p50 0.04374 p99 0.26546 p999 0.37741 max 0.50674
+### kv120832_lc_122880_2_p6_kf4096.log
+full eps    5e-03: pairs 49152 pooled cos 0.999254 mean cos 0.997972 min 0.769900 | cos<0.99 1667 cos<0.9 12 cos<0 0 | relL2 mean 0.05902 p50 0.04527 p99 0.25828 p999 0.43106 max 0.68691
+### kv120832_lc_122880_2_p6_kf60416.log
+full eps    5e-03: pairs 49152 pooled cos 0.999305 mean cos 0.998788 min 0.905195 | cos<0.99 572 cos<0.9 0 cos<0 0 | relL2 mean 0.04793 p50 0.03986 p99 0.17593 p999 0.26453 max 0.49257
+### kv120832_lc_122880_2_p6_km108544.log
+full eps    5e-03: pairs 49152 pooled cos 0.999169 mean cos 0.997402 min 0.731013 | cos<0.99 2203 cos<0.9 56 cos<0 0 | relL2 mean 0.06542 p50 0.04725 p99 0.31899 p999 0.51640 max 0.75362
+### kv120832_lc_122880_2_p6_km65536.log
+full eps    5e-03: pairs 49152 pooled cos 0.998954 mean cos 0.994645 min 0.559054 | cos<0.99 5001 cos<0.9 431 cos<0 0 | relL2 mean 0.08843 p50 0.05505 p99 0.51747 p999 0.77836 max 1.02185
+### kv120832_lc_122880_2_p6_km81920.log
+full eps    5e-03: pairs 49152 pooled cos 0.999056 mean cos 0.995798 min 0.643670 | cos<0.99 4034 cos<0.9 222 cos<0 0 | relL2 mean 0.08058 p50 0.05351 p99 0.43444 p999 0.65966 max 0.88969
+### kv120832_lc_122880_2_p6_km98304.log
+full eps    5e-03: pairs 49152 pooled cos 0.999118 mean cos 0.996619 min 0.709508 | cos<0.99 3210 cos<0.9 104 cos<0 0 | relL2 mean 0.07415 p50 0.05242 p99 0.36454 p999 0.57266 max 0.79002
+```

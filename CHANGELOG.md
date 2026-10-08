@@ -7,6 +7,12 @@
   0.003 / 0.01 / 0.02: 0.926464 / 0.857105 / 0.834358 / 0.624999 (sample: 0.967307 / 0.946039 / 0.944326 /
   0.944326). Paged = flat on all pairs. Incremental tile cache, lc_122880_2, eps 0.005: min 0.679235, 275 pairs
   < 0.9 (full requantization 0.841302, 14).
+- Incremental tile cache: K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` 1.125 (was 2).
+  Cause: frozen K mean (AUDIT.md, Phase 4). lc_122880_2, eps 0.005, 60 chunks: last chunk min cos 0.679235 ->
+  0.829814, pairs < 0.9 275 -> 17 (full requantization 0.841302, 14); worst chunk vs full requantization, pairs
+  < 0.99: 1452 -> 29; 178.32 -> 182.88 ms (full requantization 196.59 ms).
+- Bench: `APA_CHUNKS=2` compares every chunk with a full requantization; diagnostics `-DAPA_DBG_KMEAN_LEN`,
+  `-DAPA_DBG_KMEAN_FROM`.
 
 ## 0.3.0 (2026-10-08)
 

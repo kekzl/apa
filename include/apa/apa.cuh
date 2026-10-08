@@ -139,7 +139,20 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
   const dim3 gkv(dm.ntkv, p.Hkv, p.B);
   stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
-  finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv, 1.f);
+#ifdef APA_DBG_KMEAN_LEN  // diagnostic: K mean over the first N keys only (multiple of 1024), maxima over all
+  const int kml = std::min(p.Skv, APA_DBG_KMEAN_LEN), kmc = kml / (STATS_TILES * BKV);
+  if ((e = cudaMemset2DAsync(w.kpart + (size_t)kmc * D, (size_t)w.nchunk * D * 4, 0, (size_t)(w.nchunk - kmc) * D * 4,
+                             bhk, st)) != cudaSuccess)
+    return e;
+#elif defined(APA_DBG_KMEAN_FROM)  // diagnostic: K mean over keys [N, Skv) only (N multiple of 1024)
+  const int kmf = std::min(p.Skv - 1024, APA_DBG_KMEAN_FROM) / (STATS_TILES * BKV);
+  const int kml = p.Skv - kmf * STATS_TILES * BKV;
+  if ((e = cudaMemset2DAsync(w.kpart, (size_t)w.nchunk * D * 4, 0, (size_t)kmf * D * 4, bhk, st)) != cudaSuccess)
+    return e;
+#else
+  const int kml = p.Skv;
+#endif
+  finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, kml, 1.f);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
@@ -277,13 +290,18 @@ template <typename T>
 }
 
 // Persistent K/V tiles of one sequence and layer for chunked prefill: a chunk quantizes only its new tiles.
-// K mean and head scales are frozen (rebuilt when the context doubles), widened by KV_HEADROOM (later keys up to 4x the
-// first chunk's maxima keep UE4M3 block scales in range). len = keys quantized so far; a call whose
-// q_offset != len (new sequence, gap) starts over.
+// K mean and head scales are frozen (rebuilt when the context grows by KV_RESTAT), widened by KV_HEADROOM (later
+// keys up to 4x the first chunk's maxima keep UE4M3 block scales in range). len = keys quantized so far; a call
+// whose q_offset != len (new sequence, gap) starts over.
 #ifndef APA_KV_HEADROOM
 #define APA_KV_HEADROOM 4.f
 #endif
 constexpr float KV_HEADROOM = APA_KV_HEADROOM;
+#ifndef APA_KV_RESTAT
+#define APA_KV_RESTAT 1.125f
+#endif
+// Restat when Skv >= KV_RESTAT * stats_len. Stale K mean, lc_122880_2 eps 0.005: 1.84x -> 431 pairs < 0.9, 1.11x -> 56.
+constexpr float KV_RESTAT = APA_KV_RESTAT;
 struct KvState {
   uint8_t* KV;    // [B * Hkv][cap][TILE]
   HeadScale* hs;  // [B * Hkv]
@@ -316,7 +334,7 @@ inline KvState kv_state_carve(void* base, int B, int Hkv, int D, int cap_tokens)
   return st;
 }
 
-// Prep of one chunk on a KvState. Host restart (new sequence: q_offset != len; context doubled since the
+// Prep of one chunk on a KvState. Host restart (new sequence: q_offset != len; context x KV_RESTAT since the
 // stats) = stats over all keys, all tiles. Otherwise the GPU checks the fingerprint and redoes everything
 // on a mismatch (another sequence in the cache), else quantizes the tiles from len / BKV on.
 template <int D, typename T, typename Reader>
@@ -327,7 +345,7 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
   dq.kvcap = st.cap;
   const unsigned bhk = (unsigned)(p.B * p.Hkv);
   const dim3 gkv(dm.ntkv, p.Hkv, p.B);
-  const bool restart = st.len == 0 || p.q_offset != st.len || p.Skv >= 2 * st.stats_len;
+  const bool restart = st.len == 0 || p.q_offset != st.len || p.Skv >= KV_RESTAT * st.stats_len;
   const int* gate = restart ? nullptr : st.redo;
   cudaError_t e = cudaSuccess;
   if (restart) {

@@ -169,3 +169,26 @@ old Tables 4 / 5 reproduced exactly, so their times stay and the accuracy column
 | Incremental vs full requant, lc_122880_1 | 0.993415 vs 0.997192 | 0.974581 vs 0.975775, 0 < 0.9 | paper text |
 
 Open: 14 pairs < 0.9 (lc_122880_2, eps 0.005), 18 at eps 0.02; incremental cache adds 261 on the same dump.
+
+## Phase 4: incremental tile cache
+
+Runs: PERF_LOG "Phase 4". lc_122880_2, eps 0.005, all pairs unless noted.
+
+| | Hypothesis | Verdict | Evidence |
+|---|---|---|---|
+| (a) | KV_HEADROOM 4 pushes UE4M3 block scales into the subnormal range | rejected | headroom 1 / 2 / 4: bitwise equal results on 3 dumps (power-of-two shift); headroom 3 differs (macro active); headroom 1 does not clip, so the first 65536 keys hold the maxima |
+| (b) | frozen K mean (stats from the last restat, 65536 keys at the last chunk) | confirmed | full requantization of 120832 keys with the K mean over the first 65536 keys: min 0.559054, 431 pairs < 0.9 = incremental with restat 2 (0.559054, 430) |
+
+K-mean age (kv 120832, mean over first L keys) vs pairs < 0.9: L 65536 / 81920 / 98304 / 108544 / 120832 -> 431 / 222 / 104 / 56 / 24
+(lc_122880_0: 0 throughout, min 0.966430 .. 0.954930). K mean over recent keys only ([4096, Skv) / [60416, Skv)): lc_122880_2
+12 / 0 pairs < 0.9, lc_122880_0 cos < 0.99 1189 / 2124 vs 1142: no consistent gain, full requantization unchanged.
+
+| KV_RESTAT | last chunk min / < 0.9 | worst chunk vs requant, max cos < 0.99 (lc_122880_2 / _0 / _1) | incremental ms |
+|---|---|---|---|
+| 2 (0.3.0) | 0.679235 / 275 | 1452 / 33 / 10 | 178.32 |
+| 1.5 | 0.745347 / 130 | 610 / 5 / 9 | 179.98 |
+| 1.25 | 0.841302 / 14 (restat at the last chunk) | 59 / 2 / 6 | 180.99 |
+| 1.125 (new default) | 0.829814 / 17 | 29 / 2 / 6 | 182.88 |
+| full requant | 0.841302 / 14 | - | 196.59 |
+
+Decision: KV_RESTAT 1.125. Open: per-restat K mean with a per-row score offset in pass 1 / pass 2 (removes the age effect).

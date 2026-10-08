@@ -249,8 +249,9 @@ order-independent. The same 5 reruns now give bitwise identical outputs; prep ti
 Pass 2 reads K/V through a reader abstraction: flat \code{[B][S][H\_kv][d]} or a paged FP16 pool through a
 block table \cite{kwon2023pagedattention}, plus a flat tail for the chunk not yet in the cache. For chunked
 prefill, \code{prefill\_incremental} keeps a per-layer \code{KvState} with the quantized tile blobs and
-statistics; a new chunk quantizes only its new keys. Head scales are widened by a headroom factor so later
-keys fit, and a fingerprint of 48 key values detects a stale cache and triggers a full requantization.
+statistics; a new chunk quantizes only its new keys. K mean and head scales stay frozen until the context
+has grown by a factor \code{KV\_RESTAT} (1.125, 2 in 0.3.0); then every tile is requantized. Head scales are
+widened by a headroom factor so later keys fit, and a fingerprint of 48 key values detects a stale cache and triggers a full requantization.
 
 \section{Evaluation}
 
@@ -352,9 +353,13 @@ pairs rises on every dump, from $-0.638155$ to 0.841302 on lc\_122880\_2 and fro
 lc\_32768\_2, and the 899 negative pairs disappear. Attention times stay within run-to-run noise; hot shares
 change by at most 0.2 points. Over all pairs (0.3.0, $\eps=0.005$), the paged path (block size 16) matches
 the flat one on lc\_122880\_1 and lc\_122880\_2 to all six printed digits. Chunked prefill (60 chunks of
-2048 queries, last chunk evaluated) with the incremental tile cache reaches a minimum of 0.679235 and 275
-pairs below 0.9 on lc\_122880\_2, against 0.841302 and 14 for a full requantization per chunk (lc\_122880\_1:
-0.974581 against 0.975775, 0 pairs below 0.9). 5 reruns stay bitwise identical.
+2048 queries, last chunk evaluated) with the incremental tile cache and the 0.3.0 restat factor 2 reaches a
+minimum of 0.679235 and 275 pairs below 0.9 on lc\_122880\_2, against 0.841302 and 14 for a full
+requantization per chunk. The cause is the frozen K mean: a full requantization of 120832 keys whose K mean
+covers only the first 65536, 81920, 98304 or 108544 keys gives 431, 222, 104 and 56 pairs below 0.9 (all keys:
+24). With \code{KV\_RESTAT} 1.125 the last chunk reaches 0.829814 and 17 pairs below 0.9; compared with a full
+requantization at every one of the 60 chunks, the worst chunk has 29 pairs below 0.99 instead of 1452, at
+182.88 instead of 178.32\,ms (full requantization: 196.59\,ms). 5 reruns stay bitwise identical.
 
 \subsection{Threshold and context length}
 
@@ -509,9 +514,10 @@ APA 0.2.0 / 0.1.0.}
   cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
   decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
   would target such rows.
-\item \textbf{Chunked prefill.} The incremental tile cache widens head scales for later keys; over all pairs of
-  lc\_122880\_2 it reaches a minimum of 0.679235 and 275 pairs below 0.9, against 0.841302 and 14 for a full
-  requantization per chunk (174.42 against 191.64\,ms for 60 chunks).
+\item \textbf{Chunked prefill.} The incremental tile cache keeps the K mean of its last restat; on
+  lc\_122880\_2 the pairs below 0.9 grow from 24 to 431 as the context grows to 1.84 times the keys of that mean
+  (1.11 times: 56). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score
+  offset would remove it.
 \item \textbf{Exact mode.} The f16 output accumulation of pass 2 limits the all-exact configuration;
   the FP32 alternative costs 14.5 to 24.9\,\% at $\eps=0.005$ through register spills.
 \item \textbf{Granularity.} The hot verdict is per (warp, tile): one row of 16 makes the tile exact for all.

@@ -498,6 +498,37 @@ int main(int argc, char** argv) {
     full_summary("incremental");
     std::printf("chunks %d x %d eps %.0e: full requant %.2f ms cos %.6f min %.6f | incremental %.2f ms cos %.6f min %.6f\n",
                 nc, n, eps, tf, cf, cmin, ti, ci, cmin2);
+    // APA_CHUNKS=2: every chunk, incremental vs full requantization (same keys, same Q): min cos over all pairs
+    if (std::atoi(std::getenv("APA_CHUNKS")) == 2) {
+      std::vector<T> hf(nq), hi(nq);
+      double wmin = 1;
+      int wc = 0;
+      size_t w9 = 0, w99 = 0;
+      st.len = st.stats_len = 0;
+      for (int c = 0; c < nc; ++c) {
+        if (!apa::prefill(Q, K, V, O, chunk(c), eps, ws, wsb, 0)) std::exit(8);
+        CK(cudaMemcpy(hf.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+        if (!apa::prefill_incremental(Q, rd, O, chunk(c), eps, st, ws, wsb, 0)) std::exit(9);
+        CK(cudaMemcpy(hi.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+        double cm = 1;
+        size_t b9 = 0, b99 = 0;
+        for (size_t i = 0; i < (size_t)n * nh; ++i) {
+          double d = 0, x = 0, y = 0;
+          for (int e = 0; e < hd; ++e) {
+            const double a = __half2float(hf[i * hd + e]), b = __half2float(hi[i * hd + e]);
+            d += a * b, x += a * a, y += b * b;
+          }
+          const double cc = d / std::sqrt(x * y);
+          cm = std::min(cm, cc), b9 += cc < 0.9, b99 += cc < 0.99;
+        }
+        std::printf("  chunk %2d kv %6d stats_len %6d: incr vs requant min cos %.6f cos<0.99 %zu cos<0.9 %zu\n", c,
+                    (c + 1) * n, st.stats_len, cm, b99, b9);
+        if (cm < wmin) wmin = cm, wc = c;
+        w9 = std::max(w9, b9), w99 = std::max(w99, b99);
+      }
+      std::printf("chunks incr vs requant: worst min cos %.6f (chunk %d), max cos<0.99 %zu, max cos<0.9 %zu\n", wmin, wc,
+                  w99, w9);
+    }
     // stale cache: keys shifted by one token, q_offset == st.len: the fingerprint must force a full redo
     apa::Problem ps = chunk(nc - 2);
     const apa::FlatKV<T> rs{K + (size_t)nkv * 128, V + (size_t)nkv * 128};

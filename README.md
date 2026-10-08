@@ -82,7 +82,7 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 |---|---|
 | `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream)` | flat K/V; `ws` holds `workspace_bytes(p)` |
 | `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
-| `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; lc_122880_2, eps 0.005, all pairs: min cos 0.679235, 275 pairs < 0.9 (full requantization per chunk: 0.841302, 14) |
+| `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.829814, 17 pairs < 0.9 (2.0 as in 0.3.0: 0.679235, 275; full requantization per chunk: 0.841302, 14) |
 | `supported(p, kv)` | shape gate; every entry point returns false when it declines |
 
 `eps`: tile share of the running row sum above which a tile is exact; 0.005 is the measured trade-off above.
@@ -96,7 +96,8 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | One eps | `APA_EPS=0.005` |
 | Short context | `APA_KV=8192` (first N keys) |
 | Paged path | `APA_PAGED=16` (block size) |
-| Chunked prefill + tile cache | `APA_CHUNKS=1` |
+| Chunked prefill + tile cache | `APA_CHUNKS=1`; `=2` also compares every chunk with a full requantization |
+| K mean over the first N keys / keys [N, Skv) (diagnostic) | `NVFLAGS=-DAPA_DBG_KMEAN_LEN=N` / `-DAPA_DBG_KMEAN_FROM=N` |
 | Determinism (5 reruns, bitwise) | `APA_DET=1` |
 | Worst sampled row: norms, V cancellation, hot/cold mass | `APA_DIAG=1` |
 | Every (row, head) pair vs FP32: histogram, relL2, top-20; with `APA_PAGED` / `APA_CHUNKS` also those paths | `APA_FULL=1` (`APA_REF_CACHE=file` caches the reference) |
