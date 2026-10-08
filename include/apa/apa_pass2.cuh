@@ -43,8 +43,8 @@ constexpr int P2_SMEM = 2 * BKV * 128 * 2;  // K + V tile, D = 128 FP16
 constexpr int P2_ROWB = 128 * 2;
 
 // O accumulator, 16 n8 tiles x (row lo cols T0*2,+1 | row hi). APA_P2_F32O 0: half2, f16 across tiles (full-rate
-// HMMA). 1: fp32 across tiles, f16 per 16-token k-step; all-exact lc_122880_0 cos 0.996468 -> 0.999998, attn +8 to
-// 25 % at eps 5e-3 (register spills).
+// HMMA). 1: fp32 across tiles, f16 per 16-token k-step; all-exact lc_122880_1 cos min 0.988660 -> 0.999997, attn
+// +14 to 25 % at eps 5e-3 (register spills).
 #ifndef APA_P2_F32O
 #define APA_P2_F32O 0
 #endif

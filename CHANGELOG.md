@@ -9,8 +9,8 @@
   0.898838 / 0.970893 / 0.984021 -> 0.944326 / 0.987198 / 0.967587 / 0.969733 / 0.997192 / 0.996628.
   Speed equal within noise; paged path same accuracy; incremental min -0.431078 -> 0.822568; deterministic.
 - `APA_P2_F32O=1` (default 0): pass-2 O in fp32 across tiles, f16 per 16-token k-step. All-exact cos
-  lc_122880_0 0.996468 -> 0.999998, lc_122880_2 min 0.876635 -> 0.999939; attn +8 to 25 % at eps 0.005
-  (register spills) with no accuracy gain there.
+  lc_122880_1 mean 0.999634 -> 1.000000, min 0.988660 -> 0.999997 (12.431 -> 17.339 ms); attn at eps 0.005
+  +14.5 % (lc_122880_1) and +24.9 % (lc_32768_1), register spills, cos mean 0.999791 -> 0.999804.
 - Bench: `APA_DIAG=1` prints the worst sampled row (norms, V cancellation, hot / cold mass).
 - imp perplexity and prefill numbers in the README are 0.2.0 (not yet re-measured).
 
