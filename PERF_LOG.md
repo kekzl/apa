@@ -1810,3 +1810,191 @@ prep: sampled-stats overflow redo 0
 apa eps    5e-03: cos 0.999786 min 0.987436  hot  17.8 % p2load  40.7 %  attn 1.847 ms (pass2 1.128) 432.5 TOPS  (prep 0.139 ms)
 full eps    5e-03: pairs 49152 pooled cos 0.999784 mean cos 0.999420 min 0.970655 | cos<0.99 170 cos<0.9 0 cos<0 0 | relL2 mean 0.03019 p50 0.02325 p99 0.12658 p999 0.18562 max 0.30861
 ```
+
+## 2026-10-08 Phase 5 test matrix (main 2ba09e1, then KvState / paged / bench fixes)
+
+Round 1 (2ba09e1 builds: base = before 516ce53, t_* = 2ba09e1 variants). Summary lines, verbatim:
+
+```
+A build def [] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build dbg [-DAPA_DBG] rc 0 warnings 0 40 bytes spill stores 48 bytes spill stores 52 bytes spill stores 60 bytes spill stores 
+A build f32o [-DAPA_P2_F32O=1] rc 0 warnings 0 172 bytes spill stores 184 bytes spill stores 192 bytes spill stores 236 bytes spill stores 
+A build hd0 [-DAPA_HOT_DROP=0] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build xm [-DAPA_EXACT_MAX] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build o0 [-DAPA_ORDER=0] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 
+A build ps0 [-DAPA_PREP_SAMPLE=0] rc 0 warnings 1 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build pp2 [-DAPA_PREP_SAMPLE=1000000] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build pov [-DAPA_PREP_HEADROOM=0.015625f] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build rs2 [-DAPA_KV_RESTAT=2.f] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build kml [-DAPA_DBG_KMEAN_LEN=65536] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+A build def [] rc 0 warnings 0 28 bytes spill stores 40 bytes spill stores 48 bytes spill stores 
+C lc_122880_0 eps -1 rc 0/0: O bitwise equal
+C lc_122880_0 eps 0.005 rc 0/0: O bitwise equal
+C lc_122880_1 eps -1 rc 0/0: O bitwise equal
+C lc_122880_1 eps 0.005 rc 0/0: O bitwise equal
+C lc_122880_2 eps -1 rc 0/0: O bitwise equal
+C lc_122880_2 eps 0.005 rc 0/0: O bitwise equal
+C lc_65536_0 eps -1 rc 0/0: O bitwise equal
+C lc_65536_0 eps 0.005 rc 0/0: O bitwise equal
+C lc_65536_1 eps -1 rc 0/0: O bitwise equal
+C lc_65536_1 eps 0.005 rc 0/0: O bitwise equal
+C lc_65536_2 eps -1 rc 0/0: O bitwise equal
+C lc_65536_2 eps 0.005 rc 0/0: O bitwise equal
+C lc_32768_0 eps -1 rc 0/0: O bitwise equal
+C lc_32768_0 eps 0.005 rc 0/0: O bitwise equal
+C lc_32768_1 eps -1 rc 0/0: O bitwise equal
+C lc_32768_1 eps 0.005 rc 0/0: O bitwise equal
+C lc_32768_2 eps -1 rc 0/0: O bitwise equal
+C lc_32768_2 eps 0.005 rc 0/0: O bitwise equal
+C ra2dump_59 eps -1 rc 0/0: O bitwise equal
+C ra2dump_59 eps 0.005 rc 0/0: O bitwise equal
+C ra2dump_78 eps -1 rc 0/0: O bitwise equal
+C ra2dump_78 eps 0.005 rc 0/0: O bitwise equal
+C ra2dump_87 eps -1 rc 0/0: O bitwise equal
+C ra2dump_87 eps 0.005 rc 0/0: O bitwise equal
+D kv 2048 regression rc 0/0: O bitwise equal
+D kv 2111 regression rc 0/0: O bitwise equal
+D kv 4097 regression rc 0/0: O bitwise equal
+D kv 8191 regression rc 0/0: O bitwise equal
+D kv 10000 regression rc 0/0: O bitwise equal
+D kv 33000 regression rc 0/0: O bitwise equal
+D kv 65537 regression rc 0/0: O bitwise equal
+E bs 1 rc 0: paged vs flat: 0 of 6291456 output elements differ
+E bs 16 rc 0: paged vs flat: 0 of 6291456 output elements differ
+E bs 48 rc 0: paged vs flat: 0 of 6291456 output elements differ
+E bs 64 rc 0: paged vs flat: 0 of 6291456 output elements differ
+E bs 256 rc 0: paged vs flat: 0 of 6291456 output elements differ
+E bs 16 noshuf rc 0: paged vs flat: 0 of 6291456 output elements differ
+F lc_122880_0 rc 0/0: prep: sampled-stats overflow redo 1 | forced redo vs exact pow2 O bitwise equal
+F lc_65536_2 rc 0/0: prep: sampled-stats overflow redo 1 | forced redo vs exact pow2 O bitwise equal
+F ra2dump_87 rc 0/0: prep: sampled-stats overflow redo 0 | forced redo vs exact pow2 O bitwise equal
+G memcheck ra2dump_59 rc 9: ========= ERROR SUMMARY: 2 errors 
+G memcheck ra2dump_87 rc 9: ========= ERROR SUMMARY: 2 errors 
+G racecheck ra2dump_59 rc 9: ========= RACECHECK SUMMARY: 2 hazards displayed (2 errors, 0 warnings) 
+G racecheck ra2dump_87 rc 9: ========= RACECHECK SUMMARY: 2 hazards displayed (2 errors, 0 warnings) 
+G synccheck ra2dump_59 rc 9: ========= ERROR SUMMARY: 2 errors 
+G synccheck ra2dump_87 rc 9: ========= ERROR SUMMARY: 2 errors 
+G initcheck ra2dump_59 rc 9: ========= ERROR SUMMARY: 2 errors 
+G initcheck ra2dump_87 rc 9: ========= ERROR SUMMARY: 2 errors 
+H dbg rc 0: apa eps    5e-03: cos 0.999904 min 0.997013  hot  23.6 % p2load  60.5 %  attn 1.888 ms (pa | incremental 22.39 ms cos 0.999906 min 0.996894
+H f32o rc 0: apa eps    5e-03: cos 0.999911 min 0.996868  hot  23.6 % p2load  60.5 %  attn 2.205 ms (pa | incremental 26.24 ms cos 0.999912 min 0.996748
+H hd0 rc 0: apa eps    5e-03: cos 0.999786 min 0.981305  hot  23.8 % p2load  60.8 %  attn 1.848 ms (pa | incremental 21.76 ms cos 0.999807 min 0.987547
+H xm rc 0: apa eps    5e-03: cos 0.999905 min 0.996946  hot  23.7 % p2load  60.6 %  attn 1.864 ms (pa | incremental 22.26 ms cos 0.999906 min 0.996930
+H o0 rc 0: apa eps    5e-03: cos 0.999963 min 0.997819  hot  46.8 % p2load  84.5 %  attn 2.708 ms (pa | incremental 25.16 ms cos 0.999964 min 0.997419
+H rs2 rc 0: apa eps    5e-03: cos 0.999904 min 0.997013  hot  23.6 % p2load  60.5 %  attn 1.853 ms (pa | incremental 21.78 ms cos 0.999906 min 0.996628
+H kml rc 0: apa eps    5e-03: cos 0.999904 min 0.995864  hot  23.6 % p2load  60.1 %  attn 1.877 ms (pa | incremental 21.87 ms cos 0.999906 min 0.996894
+```
+
+Round 1 findings: ra2dump_59 / ra2dump_78 / APA_KV 2048 exit 3 (prefill_paged with tail 0); APA_B2 with APA_KV
+placed batch 1 at the uncut dump offset (bench); B=2 on lc_32768_0 eps 0.01: 1 element +0 vs -0. lc_65536_* at
+eps 0.005 (relayed from run output): base lc_65536_0 mean cos 0.997725 min 0.747445 cos<0.9 149, lc_65536_2 min
+0.944616; 2ba09e1 lc_65536_0 0.997890 / 0.773144 / 124, lc_65536_2 min 0.909434.
+
+Round 2 (t2_* = KvState sampled stats, paged tail 0, bench fixes; t2_kov = `-DAPA_KV_HEADROOM=0.015625f
+-DAPA_PREP_SAMPLE=1000000`):
+
+```
+R1 lc_122880_0 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_122880_1 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_122880_2 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_65536_0 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_65536_1 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_65536_2 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_32768_0 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_32768_1 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 lc_32768_2 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 ra2dump_59 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 ra2dump_78 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R1 ra2dump_87 eps 0.005 t_def/t2_def rc 0/0: O bitwise equal
+R2 lc_122880_0 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_122880_1 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_122880_2 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_65536_0 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_65536_1 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_65536_2 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_32768_0 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_32768_1 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 lc_32768_2 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 ra2dump_59 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 ra2dump_78 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 ra2dump_87 eps 0.005 base/t2_ps0 rc 0/0: O bitwise equal
+R2 chunks lc_122880_2 rc 0/0: base vs ps0 incremental lines equal
+R2 chunks lc_65536_0 rc 0/0: base vs ps0 incremental lines equal
+R2 chunks ra2dump_87 rc 0/0: base vs ps0 incremental lines equal
+R3 lc_122880_0 rc 0: chunks incr vs requant: worst min cos 0.993088 (chunk 46), max cos<0.99 0, max cos<0.9 0, bitwise equal 27 of 60 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_122880_1 rc 0: chunks incr vs requant: worst min cos 0.986572 (chunk 18), max cos<0.99 3, max cos<0.9 0, bitwise equal 27 of 60 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_122880_2 rc 0: chunks incr vs requant: worst min cos 0.888330 (chunk 9), max cos<0.99 30, max cos<0.9 1, bitwise equal 27 of 60 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_65536_0 rc 0: chunks incr vs requant: worst min cos 0.992026 (chunk 31), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_65536_1 rc 0: chunks incr vs requant: worst min cos 0.985085 (chunk 13), max cos<0.99 1, max cos<0.9 0, bitwise equal 18 of 32 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_65536_2 rc 0: chunks incr vs requant: worst min cos 0.895020 (chunk 18), max cos<0.99 29, max cos<0.9 1, bitwise equal 18 of 32 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_32768_0 rc 0: chunks incr vs requant: worst min cos 0.996913 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_32768_1 rc 0: chunks incr vs requant: worst min cos 0.996732 (chunk 13), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 lc_32768_2 rc 0: chunks incr vs requant: worst min cos 0.960679 (chunk 9), max cos<0.99 3, max cos<0.9 0, bitwise equal 12 of 16 | stale-cache redo vs fresh prefill: cos 1.000000
+R3 ra2dump_59 rc 6: chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 1 of 1 | 
+R3 ra2dump_78 rc 6: chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 1 of 1 | 
+R3 ra2dump_87 rc 0: chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 2 of 2 | stale-cache redo vs fresh prefill: cos 1.000000
+R4 forced KvState overflow lc_122880_2 rc 0: chunks incr vs requant: worst min cos 0.953339 (chunk 31), max cos<0.99 26, max cos<0.9 0, bitwise equal 24 of 60
+R4 forced KvState overflow lc_65536_0 rc 0: chunks incr vs requant: worst min cos 0.993283 (chunk 9), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32
+R4 forced KvState overflow lc_32768_1 rc 0: chunks incr vs requant: worst min cos 0.992231 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+R4 forced KvState overflow ra2dump_87 rc 0: chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 2 of 2
+R5 ra2dump_59 rc 0: paged vs flat: 0 of 6291456 output elements differ batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 5) 
+R5 ra2dump_78 rc 0: paged vs flat: 0 of 6291456 output elements differ batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 6) 
+R5 kv 2048 rc 0: paged vs flat: 0 of 6291456 output elements differ
+R6 kv 2048 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 kv 2111 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 1) 
+R6 kv 4097 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 kv 8191 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 kv 10000 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 kv 33000 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 kv 65537 rc 0: batch 2 eps 5e-03: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 0) 
+R6 lc_32768_0 eps 1e-2 rc 0: batch 2 eps 1e-02: batch 0 vs B=1 0, batch 1 vs -(B=1) 0 of 6291456 elements differ (+-0: 1) 
+R7 lc_122880_0 rc 0: sampled-stats overflow redo 0 | hot  10.2 % attn 4.323 ms prep 0.478 ms | pooled cos 0.999417 mean cos 0.998536 min 0.957087 | cos<0.99 1612 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_122880_1 rc 0: sampled-stats overflow redo 0 | hot   9.5 % attn 4.496 ms prep 0.479 ms | pooled cos 0.999802 mean cos 0.999705 min 0.972723 | cos<0.99 13 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_122880_2 rc 0: sampled-stats overflow redo 0 | hot   5.9 % attn 4.690 ms prep 0.482 ms | pooled cos 0.999380 mean cos 0.998352 min 0.847877 | cos<0.99 1224 cos<0.9 13 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_65536_0 rc 0: sampled-stats overflow redo 0 | hot  19.2 % attn 2.920 ms prep 0.280 ms | pooled cos 0.999236 mean cos 0.997890 min 0.773144 | cos<0.99 1296 cos<0.9 124 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_65536_1 rc 0: sampled-stats overflow redo 0 | hot  13.8 % attn 3.021 ms prep 0.280 ms | pooled cos 0.999851 mean cos 0.999766 min 0.985146 | cos<0.99 6 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_65536_2 rc 0: sampled-stats overflow redo 0 | hot   9.5 % attn 2.898 ms prep 0.278 ms | pooled cos 0.999539 mean cos 0.999027 min 0.909434 | cos<0.99 370 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_32768_0 rc 0: sampled-stats overflow redo 0 | hot  39.3 % attn 2.367 ms prep 0.144 ms | pooled cos 0.999626 mean cos 0.999046 min 0.938131 | cos<0.99 503 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_32768_1 rc 0: sampled-stats overflow redo 0 | hot  23.6 % attn 1.854 ms prep 0.138 ms | pooled cos 0.999908 mean cos 0.999837 min 0.990549 | cos<0.99 0 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 lc_32768_2 rc 0: sampled-stats overflow redo 0 | hot  17.8 % attn 1.858 ms prep 0.139 ms | pooled cos 0.999784 mean cos 0.999420 min 0.970655 | cos<0.99 170 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 ra2dump_59 rc 0: sampled-stats overflow redo 0 | hot  64.2 % attn 0.169 ms prep 0.031 ms | pooled cos 0.999990 mean cos 0.999979 min 0.993380 | cos<0.99 0 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 ra2dump_78 rc 0: sampled-stats overflow redo 0 | hot  62.2 % attn 0.150 ms prep 0.034 ms | pooled cos 0.999993 mean cos 0.999976 min 0.991309 | cos<0.99 0 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R7 ra2dump_87 rc 0: sampled-stats overflow redo 0 | hot  42.3 % attn 0.295 ms prep 0.138 ms | pooled cos 0.999968 mean cos 0.999924 min 0.983843 | cos<0.99 2 cos<0.9 0 cos<0 0 | determinism: 0 of 25165824 output elements differ over 4 reruns
+R8 lc_122880_1 t_def rc 0: chunks 60 x 2048 eps 5e-03: full requant 194.23 ms cos 0.999782 min 0.995919 | incremental 187.21 ms cos 0.999789 min 0.997316
+R8 lc_122880_1 t2_def rc 0: chunks 60 x 2048 eps 5e-03: full requant 194.78 ms cos 0.999782 min 0.995919 | incremental 187.85 ms cos 0.999782 min 0.995820
+R8 lc_122880_2 t_def rc 0: chunks 60 x 2048 eps 5e-03: full requant 182.07 ms cos 0.999419 min 0.941224 | incremental 175.84 ms cos 0.999394 min 0.938871
+R8 lc_122880_2 t2_def rc 0: chunks 60 x 2048 eps 5e-03: full requant 182.16 ms cos 0.999419 min 0.941224 | incremental 175.15 ms cos 0.999406 min 0.928188
+R8 lc_65536_0 t_def rc 0: chunks 32 x 2048 eps 5e-03: full requant 71.84 ms cos 0.999233 min 0.870946 | incremental 70.06 ms cos 0.999189 min 0.839730
+R8 lc_65536_0 t2_def rc 0: chunks 32 x 2048 eps 5e-03: full requant 71.92 ms cos 0.999233 min 0.870946 | incremental 71.08 ms cos 0.999204 min 0.854722
+DONE R1 R2 R3 R4 R5 R6 R7 R8
+```
+
+bench/test.sh, REF=base, all 12 dumps: 115 checks ok, result line: ALL OK. All-pairs lines (eps 0.005):
+
+```
+full eps    5e-03: pairs 49152 pooled cos 0.999417 mean cos 0.998536 min 0.957087 | cos<0.99 1612 cos<0.9 0 cos<0 0 | re
+full eps    5e-03: pairs 49152 pooled cos 0.999802 mean cos 0.999705 min 0.972723 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL
+full eps    5e-03: pairs 49152 pooled cos 0.999380 mean cos 0.998352 min 0.847877 | cos<0.99 1224 cos<0.9 13 cos<0 0 | r
+full eps    5e-03: pairs 49152 pooled cos 0.999626 mean cos 0.999046 min 0.938131 | cos<0.99 503 cos<0.9 0 cos<0 0 | rel
+full eps    5e-03: pairs 49152 pooled cos 0.999908 mean cos 0.999837 min 0.990549 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999784 mean cos 0.999420 min 0.970655 | cos<0.99 170 cos<0.9 0 cos<0 0 | rel
+full eps    5e-03: pairs 49152 pooled cos 0.999236 mean cos 0.997890 min 0.773144 | cos<0.99 1296 cos<0.9 124 cos<0 0 | 
+full eps    5e-03: pairs 49152 pooled cos 0.999851 mean cos 0.999766 min 0.985146 | cos<0.99 6 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999539 mean cos 0.999027 min 0.909434 | cos<0.99 370 cos<0.9 0 cos<0 0 | rel
+full eps    5e-03: pairs 49152 pooled cos 0.999990 mean cos 0.999979 min 0.993380 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999993 mean cos 0.999976 min 0.991309 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999968 mean cos 0.999924 min 0.983843 | cos<0.99 2 cos<0.9 0 cos<0 0 | relL2
+```
+
+KvState all pairs, last chunk (t3_def):
+
+```
+### lc_122880_2
+  full full requant: pooled cos 0.999380 mean cos 0.998352 min 0.847877 cos<0.9 13 cos<0 0
+  full incremental: pooled cos 0.999378 mean cos 0.998169 min 0.821417 cos<0.9 24 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 183.53 ms cos 0.999419 min 0.941224 | incremental 176.53 ms cos 0.999406 min 0.928188
+### lc_122880_1
+  full full requant: pooled cos 0.999802 mean cos 0.999705 min 0.972723 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999801 mean cos 0.999708 min 0.971340 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 196.14 ms cos 0.999782 min 0.995919 | incremental 189.50 ms cos 0.999782 min 0.995820
+```

@@ -132,11 +132,24 @@ struct Launch<256> {
 };
 
 // Prep (stats + KV blobs + Q packing) only; attn() consumes the workspace. Stats read every stride-th 1024-key chunk
-// (>= APA_PREP_SAMPLE chunks; 0: all chunks, exact head scales). Sampled scales get headroom 4; head scales round up
-// to powers of two. A 16-block past the UE4M3 range sets ovf: exact stats + every tile again, gated on the device.
+// (>= APA_PREP_SAMPLE chunks; 0: all chunks, exact head scales). Head scales x4, rounded up to powers of two (as the
+// KvState: equal tiles at restats). A 16-block past the UE4M3 range sets ovf: exact stats + every tile again, gated.
 #ifndef APA_PREP_SAMPLE
 #define APA_PREP_SAMPLE 16
 #endif
+#ifndef APA_KV_HEADROOM  // head scales x this: later keys (KvState) or unsampled chunks up to 4x the seen maxima
+#define APA_KV_HEADROOM 4.f
+#endif
+constexpr float KV_HEADROOM = APA_KV_HEADROOM;
+// Stats sampling: every stride-th 1024-key chunk, >= APA_PREP_SAMPLE chunks (0: all); keys the sample covers.
+inline int stats_stride(int nchunk) {
+  return APA_PREP_SAMPLE > 0 ? std::max(1, nchunk / (APA_PREP_SAMPLE > 0 ? APA_PREP_SAMPLE : 1)) : 1;
+}
+inline int stats_keys(int skv, int nchunk, int stride) {
+  int n = 0;
+  for (int c = 0; c * stride < nchunk; ++c) n += std::min(STATS_TILES * BKV, skv - c * stride * STATS_TILES * BKV);
+  return n;
+}
 #ifndef APA_PREP_HEADROOM  // sampled head scales x this (power of two); tiny values force the overflow redo (test)
 #define APA_PREP_HEADROOM 4.f
 #endif
@@ -147,15 +160,12 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
   cudaError_t e = cudaMemsetAsync(w.amax, 0, (bhk * 3 + 1) * 4, st);  // amax and ovf
   if (e != cudaSuccess) return e;
   const dim3 gkv(dm.ntkv, p.Hkv, p.B);
-  constexpr int CK = STATS_TILES * BKV;
 #if defined(APA_DBG_KMEAN_LEN) || defined(APA_DBG_KMEAN_FROM)
   const int stride = 1;
 #else
-  const int stride = APA_PREP_SAMPLE > 0 ? std::max(1, w.nchunk / APA_PREP_SAMPLE) : 1;
+  const int stride = stats_stride(w.nchunk);
 #endif
-  const int ns = (w.nchunk + stride - 1) / stride;
-  int nkeys = 0;
-  for (int c = 0; c < ns; ++c) nkeys += std::min(CK, p.Skv - c * stride * CK);
+  const int ns = (w.nchunk + stride - 1) / stride, nkeys = stats_keys(p.Skv, w.nchunk, stride);
   stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, nullptr, stride);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
 #ifdef APA_DBG_KMEAN_LEN  // diagnostic: K mean over the first N keys only (multiple of 1024), maxima over all
@@ -171,19 +181,18 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
 #else
   const int kml = nkeys;
 #endif
-  constexpr bool P2 = APA_PREP_SAMPLE > 0;
+  constexpr bool P2 = APA_PREP_SAMPLE > 0;  // 0: exact stats, exact head scales (0.3.0 prep)
+  const bool chk = P2 && (stride > 1 || APA_PREP_HEADROOM < 1.f);  // exact stats x >= 1 cannot overflow
   finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, ns, w.ksum, w.hs, kml,
-                                                       stride > 1 ? APA_PREP_HEADROOM : 1.f,
-                                                       nullptr, P2);
+                                                       P2 ? APA_PREP_HEADROOM : 1.f, nullptr, P2);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
-  quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, 0, nullptr,
-                                                  stride > 1 ? w.ovf : nullptr);
+  quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, 0, nullptr, chk ? w.ovf : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
-  if (stride > 1) {  // redo on overflow (kernels exit early when ovf == 0)
+  if (chk) {  // redo on overflow (kernels exit early when ovf == 0)
     reset_stats_kernel<D><<<(unsigned)bhk, 32, 0, st>>>(w.amax, w.ovf);
     stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, w.ovf);
-    finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv, 1.f, w.ovf,
-                                                         P2);
+    finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv,
+                                                         std::max(KV_HEADROOM, 1.f), w.ovf, P2);
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, dm.ntkv, w.ovf);
     if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   }
@@ -293,7 +302,7 @@ inline PagedF16KV paged_reader(const __half* k_pool, const __half* v_pool, const
   rd.kt = k_tail;
   rd.vt = v_tail;
   rd.tail = tail;
-  if ((block_size & (block_size - 1)) == 0) rd.bs_shift = __builtin_ctz((unsigned)block_size);
+  if (block_size > 0 && (block_size & (block_size - 1)) == 0) rd.bs_shift = __builtin_ctz((unsigned)block_size);
   return rd;
 }
 
@@ -310,6 +319,7 @@ template <typename T>
   kv.v = v_pool;
   kv.block_table = block_table;
   kv.block_size = block_size;
+  if (tail == 0) kv.kind = KvKind::Flat;  // empty pool (first chunk): block_table is never read
   if (p.D != 128 || p.B != 1 || tail < 0 || tail > p.Skv || !supported(p, kv) || ws_bytes < workspace_bytes(p))
     return false;
   const PagedF16KV rd = paged_reader(k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail);
@@ -324,10 +334,6 @@ template <typename T>
 // K mean and head scales are frozen (rebuilt when the context grows by KV_RESTAT), widened by KV_HEADROOM (later
 // keys up to 4x the first chunk's maxima keep UE4M3 block scales in range). len = keys quantized so far; a call
 // whose q_offset != len (new sequence, gap) starts over.
-#ifndef APA_KV_HEADROOM
-#define APA_KV_HEADROOM 4.f
-#endif
-constexpr float KV_HEADROOM = APA_KV_HEADROOM;
 #ifndef APA_KV_RESTAT
 #define APA_KV_RESTAT 1.125f
 #endif
@@ -378,21 +384,30 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
   const dim3 gkv(dm.ntkv, p.Hkv, p.B);
   const bool restart = st.len == 0 || p.q_offset != st.len || p.Skv >= KV_RESTAT * st.stats_len;
   const int* gate = restart ? nullptr : st.redo;
-  cudaError_t e = cudaSuccess;
-  if (restart) {
-    e = cudaMemsetAsync(w.amax, 0, bhk * 3 * 4, s);
-  } else {
+  constexpr bool P2 = APA_PREP_SAMPLE > 0;  // same sampling and scales as prep_d (0: exact, unrounded)
+  const int stride = stats_stride(w.nchunk), ns = (w.nchunk + stride - 1) / stride;
+  cudaError_t e = cudaMemsetAsync(w.amax, 0, (bhk * 3 + 1) * 4, s);  // amax and ovf
+  if (e == cudaSuccess && !restart) {
     kv_fingerprint_kernel<D, Reader><<<1, 32, 0, s>>>(rd, dm, st.fp, st.len, st.redo, true);
-    if ((e = cudaPeekAtLastError()) == cudaSuccess) reset_stats_kernel<D><<<bhk, 32, 0, s>>>(w.amax, st.redo);
-    if (e == cudaSuccess) e = cudaPeekAtLastError();
+    e = cudaPeekAtLastError();
   }
   if (e != cudaSuccess) return e;
-  stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate);
+  stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate, stride);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
-  finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv, KV_HEADROOM, gate);
+  finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, ns, st.kmean, st.hs,
+                                             stats_keys(p.Skv, w.nchunk, stride), KV_HEADROOM, gate, P2);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
-  quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, restart ? 0 : st.len / BKV, gate);
+  quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, restart ? 0 : st.len / BKV, gate,
+                                                 P2 ? w.ovf : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
+  if (P2) {  // a key beyond the frozen or sampled scales: exact stats over all keys, every tile again (gated)
+    reset_stats_kernel<D><<<bhk, 32, 0, s>>>(w.amax, w.ovf);
+    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, w.ovf);
+    finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv,
+                                               std::max(KV_HEADROOM, 1.f), w.ovf, true);
+    quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, dm.ntkv, w.ovf);
+    if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
+  }
   kv_fingerprint_kernel<D, Reader><<<1, 32, 0, s>>>(rd, dm, st.fp, p.Skv, st.redo, false);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   quant_q_kernel<D, T><<<dim3((dm.R + BKV - 1) / BKV, p.Hkv, p.B), 256, 0, s>>>(Q, dm, p.scale * LOG2E, w.Qq, w.Qs,

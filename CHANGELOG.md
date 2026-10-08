@@ -25,6 +25,14 @@
   exact -> sampled: 0.998512 / 0.999717 / 0.998438 / 0.999037 / 0.999827 / 0.999372 -> 0.998536 / 0.999705 /
   0.998352 / 0.999046 / 0.999837 / 0.999420; min 0.959676 / 0.975775 / 0.841302 / 0.927517 / 0.980919 / 0.969776 ->
   0.957087 / 0.972723 / 0.847877 / 0.938131 / 0.990549 / 0.970655; pairs < 0.9: 14 -> 13 (lc_122880_2).
+- KvState (prefill_incremental): same sampled stats and power-of-two head scales x4 as prep; new tiles beyond the
+  frozen scales set the overflow flag and redo exact stats + every tile on the device (before: saturated). Output
+  at every restat bitwise equal to prefill (lc_122880_*: 27 of 60 chunks, lc_32768_*: 12 of 16; before: chunk 0
+  only); worst chunk vs prefill, lc_122880_2: min cos 0.777086 -> 0.888330. prep: head scales x4 also unsampled
+  (output bitwise unchanged on 12 dumps). APA_PREP_SAMPLE=0 keeps the 0.3.0 prep and KvState bitwise.
+- prefill_paged accepts tail == 0 (empty pool, first chunk) without a block table; it returned false.
+- Bench: `APA_B2=1` (batch 2, V negated: bitwise checks), paged vs flat and stale cache counted bitwise,
+  `APA_CHUNKS=2` counts bitwise equal chunks; `bench/test.sh` runs the test matrix (AUDIT.md, Phase 5).
 
 ## 0.3.0 (2026-10-08)
 

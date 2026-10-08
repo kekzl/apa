@@ -369,9 +369,11 @@ the flat one on lc\_122880\_1 and lc\_122880\_2 to all six printed digits. Chunk
 minimum of 0.679235 and 275 pairs below 0.9 on lc\_122880\_2, against 0.841302 and 14 for a full
 requantization per chunk. The cause is the frozen K mean: a full requantization of 120832 keys whose K mean
 covers only the first 65536, 81920, 98304 or 108544 keys gives 431, 222, 104 and 56 pairs below 0.9 (all keys:
-24). With \code{KV\_RESTAT} 1.125 the last chunk reaches 0.829814 and 17 pairs below 0.9; compared with a full
-requantization at every one of the 60 chunks, the worst chunk has 29 pairs below 0.99 instead of 1452, at
-182.88 instead of 178.32\,ms (full requantization: 196.59\,ms). 5 reruns stay bitwise identical.
+24). Restat at 1.125 instead of 2 times the context cuts the worst chunk against a full requantization from
+1452 to 29 pairs below 0.99 (exact stats), at 182.88 instead of 178.32\,ms for 60 chunks. With the sampled stats and
+power-of-two scales of the prep and an overflow redo, every restat chunk equals the full requantization bitwise
+(27 of 60 chunks on lc\_122880\_*); the last chunk reaches 0.821417 and 24 pairs below 0.9 (full
+requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. 5 reruns stay bitwise identical.
 
 \subsection{Threshold and context length}
 
@@ -525,7 +527,8 @@ APA 0.2.0 / 0.1.0.}
   0.841302) has the shape of Table~\ref{tab:diag}: 3 hot tiles, the largest with 0.9101 of the mass, FP32
   cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
   decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
-  would target such rows.
+  would target such rows. lc\_65536\_0, outside the tables, is the worst dump measured: 124 pairs below 0.9 at
+  $\eps=0.005$ (min 0.773144; 0.3.0 prep: 149, 0.747445).
 \item \textbf{Chunked prefill.} The incremental tile cache keeps the K mean of its last restat; on
   lc\_122880\_2 the pairs below 0.9 grow from 24 to 431 as the context grows to 1.84 times the keys of that mean
   (1.11 times: 56). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score

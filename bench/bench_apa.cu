@@ -500,6 +500,8 @@ int main(int argc, char** argv) {
     double cmin;
     const double cf = accuracy(cmin);
     full_summary("flat");
+    std::vector<T> hfl(nq), hpg(nq);
+    CK(cudaMemcpy(hfl.data(), O, nq * 2, cudaMemcpyDeviceToHost));
     const float tp = time([&] {
       if (!apa::prefill_paged(Q, kp, vp, dbt, bs, K + (size_t)off * row, V + (size_t)off * row, off, O, p, eps,
                               ws, wsb, 0))
@@ -509,6 +511,10 @@ int main(int argc, char** argv) {
     double cmin2;
     const double cp = accuracy(cmin2);
     full_summary("paged");
+    CK(cudaMemcpy(hpg.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+    size_t pdiff = 0;
+    for (size_t i = 0; i < nq; ++i) pdiff += __half_as_ushort(hfl[i]) != __half_as_ushort(hpg[i]);
+    std::printf("paged vs flat: %zu of %zu output elements differ\n", pdiff, nq);
     std::printf("paged bs %d eps %.0e: flat prep+attn %.3f ms cos %.6f min %.6f | paged %.3f ms cos %.6f min %.6f\n",
                 bs, eps, tf, cf, cmin, tp, cp, cmin2);
     CK(cudaFree(kp));
@@ -554,6 +560,7 @@ int main(int argc, char** argv) {
       double wmin = 1;
       int wc = 0;
       size_t w9 = 0, w99 = 0;
+      int neq = 0;  // chunks with bitwise equal output
       st.len = st.stats_len = 0;
       for (int c = 0; c < nc; ++c) {
         if (!apa::prefill(Q, K, V, O, chunk(c), eps, ws, wsb, 0)) std::exit(8);
@@ -561,7 +568,9 @@ int main(int argc, char** argv) {
         if (!apa::prefill_incremental(Q, rd, O, chunk(c), eps, st, ws, wsb, 0)) std::exit(9);
         CK(cudaMemcpy(hi.data(), O, nq * 2, cudaMemcpyDeviceToHost));
         double cm = 1;
-        size_t b9 = 0, b99 = 0;
+        size_t b9 = 0, b99 = 0, nd = 0;
+        for (size_t i = 0; i < nq; ++i) nd += __half_as_ushort(hf[i]) != __half_as_ushort(hi[i]);
+        neq += nd == 0;
         for (size_t i = 0; i < (size_t)n * nh; ++i) {
           double d = 0, x = 0, y = 0;
           for (int e = 0; e < hd; ++e) {
@@ -571,30 +580,80 @@ int main(int argc, char** argv) {
           const double cc = d / std::sqrt(x * y);
           cm = std::min(cm, cc), b9 += cc < 0.9, b99 += cc < 0.99;
         }
-        std::printf("  chunk %2d kv %6d stats_len %6d: incr vs requant min cos %.6f cos<0.99 %zu cos<0.9 %zu\n", c,
-                    (c + 1) * n, st.stats_len, cm, b99, b9);
+        std::printf("  chunk %2d kv %6d stats_len %6d: incr vs requant min cos %.6f cos<0.99 %zu cos<0.9 %zu, %zu differ\n",
+                    c, (c + 1) * n, st.stats_len, cm, b99, b9, nd);
         if (cm < wmin) wmin = cm, wc = c;
         w9 = std::max(w9, b9), w99 = std::max(w99, b99);
       }
-      std::printf("chunks incr vs requant: worst min cos %.6f (chunk %d), max cos<0.99 %zu, max cos<0.9 %zu\n", wmin, wc,
-                  w99, w9);
+      std::printf("chunks incr vs requant: worst min cos %.6f (chunk %d), max cos<0.99 %zu, max cos<0.9 %zu, bitwise equal"
+                  " %d of %d\n", wmin, wc, w99, w9, neq, nc);
     }
-    // stale cache: keys shifted by one token, q_offset == st.len: the fingerprint must force a full redo
-    apa::Problem ps = chunk(nc - 2);
-    const apa::FlatKV<T> rs{K + (size_t)nkv * 128, V + (size_t)nkv * 128};
-    st.len = st.stats_len = ps.q_offset;
-    if (!apa::prefill_incremental(Q, rs, O, ps, eps, st, ws, wsb, 0)) std::exit(6);
-    std::vector<T> h1(nq), h2(nq);
-    CK(cudaMemcpy(h1.data(), O, nq * 2, cudaMemcpyDeviceToHost));
-    if (!apa::prefill(Q, rs.k, rs.v, O, ps, eps, ws, wsb, 0)) std::exit(7);
-    CK(cudaMemcpy(h2.data(), O, nq * 2, cudaMemcpyDeviceToHost));
-    double d = 0, a = 0, bb = 0;
-    for (size_t i = 0; i < nq; ++i) {
-      const double x = __half2float(h1[i]), y = __half2float(h2[i]);
-      d += x * y, a += x * x, bb += y * y;
+    // stale cache (>= 2 chunks): keys shifted by one token, q_offset == st.len: the fingerprint must force a redo
+    if (nc >= 2) {
+      apa::Problem ps = chunk(nc - 2);
+      const apa::FlatKV<T> rs{K + (size_t)nkv * 128, V + (size_t)nkv * 128};
+      st.len = st.stats_len = ps.q_offset;
+      if (!apa::prefill_incremental(Q, rs, O, ps, eps, st, ws, wsb, 0)) std::exit(6);
+      std::vector<T> h1(nq), h2(nq);
+      CK(cudaMemcpy(h1.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+      if (!apa::prefill(Q, rs.k, rs.v, O, ps, eps, ws, wsb, 0)) std::exit(7);
+      CK(cudaMemcpy(h2.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+      double d = 0, a = 0, bb = 0;
+      size_t sd = 0;
+      for (size_t i = 0; i < nq; ++i) {
+        const double x = __half2float(h1[i]), y = __half2float(h2[i]);
+        d += x * y, a += x * x, bb += y * y;
+        sd += __half_as_ushort(h1[i]) != __half_as_ushort(h2[i]);
+      }
+      std::printf("stale-cache redo vs fresh prefill: cos %.6f, %zu of %zu elements differ\n",
+                  d / std::sqrt(a * bb), sd, nq);
     }
-    std::printf("stale-cache redo vs fresh prefill: cos %.6f\n", d / std::sqrt(a * bb));
     CK(cudaFree(sb));
+  }
+  // APA_B2=1: batch of 2 (batch 1 = V negated) vs B = 1 at the last eps: O[0] must equal the B = 1 output and
+  // O[1] its negation, bitwise (sign-symmetric E2M1 / f16, same K stats and hot masks).
+  if (std::getenv("APA_B2")) {
+    const float eps = epss.back();
+    const size_t ke = (size_t)kv * nkv * hd;  // K / V elements per batch (APA_KV may cut the dump)
+    T *Q2, *K2, *V2, *O2;
+    CK(cudaMalloc(&Q2, 2 * nq * 2));
+    CK(cudaMalloc(&K2, 2 * ke * 2));
+    CK(cudaMalloc(&V2, 2 * ke * 2));
+    CK(cudaMalloc(&O2, 2 * nq * 2));
+    std::vector<T> hvn(ke);
+    for (size_t i = 0; i < ke; ++i) hvn[i] = __ushort_as_half(__half_as_ushort(hv[i]) ^ 0x8000u);
+    for (int bb = 0; bb < 2; ++bb) {
+      CK(cudaMemcpy(Q2 + bb * nq, Q, nq * 2, cudaMemcpyDeviceToDevice));
+      CK(cudaMemcpy(K2 + bb * ke, K, ke * 2, cudaMemcpyDeviceToDevice));
+    }
+    CK(cudaMemcpy(V2, V, ke * 2, cudaMemcpyDeviceToDevice));
+    CK(cudaMemcpy(V2 + ke, hvn.data(), ke * 2, cudaMemcpyHostToDevice));
+    apa::Problem p2 = p;
+    p2.B = 2;
+    const size_t wsb2 = apa::workspace_bytes(p2);
+    void* ws2;
+    CK(cudaMalloc(&ws2, wsb2));
+    if (!apa::prefill(Q, K, V, O, p, eps, ws, wsb, 0) || !apa::prefill(Q2, K2, V2, O2, p2, eps, ws2, wsb2, 0))
+      std::exit(10);
+    std::vector<T> h1(nq), h2(2 * nq);
+    CK(cudaMemcpy(h1.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(h2.data(), O2, 2 * nq * 2, cudaMemcpyDeviceToHost));
+    size_t d0 = 0, d1 = 0, z1 = 0;  // z1: +0 in both batches (exact cancellation rounds to +0 either way)
+    for (size_t i = 0; i < nq; ++i) {
+      const unsigned a = __half_as_ushort(h1[i]), x = __half_as_ushort(h2[nq + i]), y = a ^ 0x8000u;
+      d0 += __half_as_ushort(h2[i]) != a;
+      const bool zero = ((x | y) & 0x7fffu) == 0;
+      z1 += x != y && zero;
+      if (x != y && !zero && d1++ == 0)
+        std::printf("batch 1 first diff at %zu: %g vs -(%g)\n", i, __half2float(h2[nq + i]), __half2float(h1[i]));
+    }
+    std::printf("batch 2 eps %.0e: batch 0 vs B=1 %zu, batch 1 vs -(B=1) %zu of %zu elements differ (+-0: %zu)\n", eps,
+                d0, d1, nq, z1);
+    CK(cudaFree(Q2));
+    CK(cudaFree(K2));
+    CK(cudaFree(V2));
+    CK(cudaFree(O2));
+    CK(cudaFree(ws2));
   }
   CK(cudaFree(ws));
 

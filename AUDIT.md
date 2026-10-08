@@ -192,3 +192,30 @@ K-mean age (kv 120832, mean over first L keys) vs pairs < 0.9: L 65536 / 81920 /
 | full requant | 0.841302 / 14 | - | 196.59 |
 
 Decision: KV_RESTAT 1.125. Open: per-restat K mean with a per-row score offset in pass 1 / pass 2 (removes the age effect).
+
+## Phase 5: test matrix
+
+Runs: PERF_LOG "Phase 5". Reusable: `bench/test.sh` (12 dumps x 9 checks + 7 builds; last run 115 ok, `ALL OK`).
+
+| Check | Scope | Result |
+|---|---|---|
+| builds | default + 11 macro variants | 0 errors; 1 warning (division by zero, APA_PREP_SAMPLE=0) fixed |
+| regression, bitwise | APA_PREP_SAMPLE=0 vs before 516ce53: 12 dumps x eps -1 / 0.005, APA_KV 2048 .. 65537 | all equal |
+| determinism | 12 dumps, 5 reruns | 0 elements differ |
+| batch 2 (batch 1 = V negated) | 12 dumps, APA_KV 2048 .. 65537 | bitwise; only +0 vs -0 from exact cancellation |
+| paged vs flat, bitwise | block size 1 / 16 / 48 / 64 / 256, unshuffled, 12 dumps | equal |
+| chunked vs prefill, bitwise | every chunk, 12 dumps | equal at every restat (27 of 60 at 122880 keys) |
+| prep overflow redo (forced) | 12 dumps | bitwise equal to exact stats |
+| KvState overflow redo (forced) | 4 dumps | redo chunks bitwise equal to prefill |
+| all pairs, eps 0.005 | 12 dumps | no NaN, no cos < 0; lc_65536_0: 124 pairs < 0.9, min 0.773144 |
+| compute-sanitizer | memcheck / racecheck / synccheck / initcheck | not run: WSL2 needs EnableDebuggerInterface.bat (admin) |
+
+| Defect | Fix |
+|---|---|
+| prefill_paged returned false for tail 0 (empty pool, first chunk): block table required but never read | accepted as flat; `__builtin_ctz(0)` guarded |
+| KvState used exact unrounded stats while prefill sampled / rounded: chunk 0 already differed (min cos 0.777086, lc_122880_2) | same sampling and scales, overflow redo; restats bitwise equal |
+| KvState: new keys beyond the frozen head scales saturated silently | overflow flag + gated redo |
+| bench: APA_B2 with APA_KV, stale-cache test with 1 chunk (exit 6) | fixed (bench only) |
+
+Open: lc_65536_0 (124 pairs < 0.9 at eps 0.005, 0.3.0 prep: 149) is the worst dump measured; cause not
+measured yet (`-DAPA_DBG` top-20 as in Phase 1).
