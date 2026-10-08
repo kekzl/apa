@@ -1781,3 +1781,32 @@ full eps    5e-03: pairs 49152 pooled cos 0.999789 mean cos 0.999417 min 0.96788
 Forced redo (prsOV) vs prsP2 O: bitwise equal on lc_122880_1 and lc_32768_2. Paged (bs 16), lc_122880_1, prs16 before /
 after the row-offset fix in pass2_cta (prep+attn ms): flat 4.930 / 4.906, paged 6.518 / 5.076 (run 2: 4.926 / 4.961,
 6.494 / 5.063); O bitwise equal.
+
+## 2026-10-08 README table, main c1b2d96 (default build), APA_FULL=1, eps 0.005
+
+```
+### lc_122880_0_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999459 min 0.972195  hot  10.2 % p2load  16.0 %  attn 4.316 ms (pass2 1.692) 710.6 TOPS  (prep 0.480 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999417 mean cos 0.998536 min 0.957087 | cos<0.99 1612 cos<0.9 0 cos<0 0 | relL2 mean 0.04685 p50 0.03429 p99 0.19587 p999 0.29419 max 0.51103
+### lc_122880_1_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999782 min 0.995919  hot   9.5 % p2load  29.7 %  attn 4.460 ms (pass2 2.023) 687.6 TOPS  (prep 0.479 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999802 mean cos 0.999705 min 0.972723 | cos<0.99 13 cos<0.9 0 cos<0 0 | relL2 mean 0.02178 p50 0.01896 p99 0.07226 p999 0.12750 max 0.29114
+### lc_122880_2_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999419 min 0.941224  hot   5.9 % p2load  17.9 %  attn 4.642 ms (pass2 1.810) 660.7 TOPS  (prep 0.487 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999380 mean cos 0.998352 min 0.847877 | cos<0.99 1224 cos<0.9 13 cos<0 0 | relL2 mean 0.05162 p50 0.03950 p99 0.25244 p999 0.41596 max 0.61488
+### lc_32768_0_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999618 min 0.967765  hot  39.3 % p2load  58.9 %  attn 2.382 ms (pass2 1.659) 335.4 TOPS  (prep 0.138 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999626 mean cos 0.999046 min 0.938131 | cos<0.99 503 cos<0.9 0 cos<0 0 | relL2 mean 0.03919 p50 0.03081 p99 0.15913 p999 0.23997 max 0.37845
+### lc_32768_1_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999904 min 0.997013  hot  23.6 % p2load  60.5 %  attn 1.844 ms (pass2 1.280) 433.2 TOPS  (prep 0.137 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999908 mean cos 0.999837 min 0.990549 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01577 p50 0.01330 p99 0.05481 p999 0.08606 max 0.14720
+### lc_32768_2_head.log
+prep: sampled-stats overflow redo 0
+apa eps    5e-03: cos 0.999786 min 0.987436  hot  17.8 % p2load  40.7 %  attn 1.847 ms (pass2 1.128) 432.5 TOPS  (prep 0.139 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999784 mean cos 0.999420 min 0.970655 | cos<0.99 170 cos<0.9 0 cos<0 0 | relL2 mean 0.03019 p50 0.02325 p99 0.12658 p999 0.18562 max 0.30861
+```

@@ -17,16 +17,16 @@ then the diagonal backwards.
 ## Results
 
 Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24 / 8 heads), eps 0.005, every
-(row, head) pair (49152) vs FP32 (`APA_FULL=1`), one run (PERF_LOG.md, `ab_*_rel32`):
+(row, head) pair (49152) vs FP32 (`APA_FULL=1`), one run, main c1b2d96 (PERF_LOG.md, "README table, main c1b2d96"):
 
 | Dump | pooled cos | mean cos | min cos | pairs < 0.9 | hot tiles | attn ms | prep ms |
 |---|---|---|---|---|---|---|---|
-| lc_122880_0 | 0.999459 | 0.998512 | 0.959676 | 0 | 10.3 % | 4.490 | 0.737 |
-| lc_122880_1 | 0.999805 | 0.999717 | 0.975775 | 0 | 9.6 % | 4.759 | 0.744 |
-| lc_122880_2 | 0.999393 | 0.998438 | 0.841302 | 14 | 6.0 % | 4.840 | 0.740 |
-| lc_32768_0 | 0.999642 | 0.999037 | 0.927517 | 0 | 39.5 % | 2.285 | 0.163 |
-| lc_32768_1 | 0.999909 | 0.999827 | 0.980919 | 0 | 23.6 % | 1.889 | 0.163 |
-| lc_32768_2 | 0.999778 | 0.999372 | 0.969776 | 0 | 17.5 % | 1.863 | 0.162 |
+| lc_122880_0 | 0.999417 | 0.998536 | 0.957087 | 0 | 10.2 % | 4.316 | 0.480 |
+| lc_122880_1 | 0.999802 | 0.999705 | 0.972723 | 0 | 9.5 % | 4.460 | 0.479 |
+| lc_122880_2 | 0.999380 | 0.998352 | 0.847877 | 13 | 5.9 % | 4.642 | 0.487 |
+| lc_32768_0 | 0.999626 | 0.999046 | 0.938131 | 0 | 39.3 % | 2.382 | 0.138 |
+| lc_32768_1 | 0.999908 | 0.999837 | 0.990549 | 0 | 23.6 % | 1.844 | 0.137 |
+| lc_32768_2 | 0.999784 | 0.999420 | 0.970655 | 0 | 17.8 % | 1.847 | 0.139 |
 
 | Term | Definition |
 |---|---|
@@ -35,10 +35,10 @@ Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24
 | hot tiles | share of active (warp, tile) pairs sent to pass 2 (bench `hot`; `p2load`: tiles pass 2 loads per q block) |
 | attn ms | fused attention kernel, prep excluded; min over 5 reps of 5 launches; drifts up to 10 % between runs |
 
-APA 0.2.0 in the same run: min cos 0.634875 / 0.925502 / -0.638155 / 0.757021 / 0.927160 / -0.594803, pairs < 0:
+APA 0.2.0 (0.3.0 audit run, PERF_LOG `ab_*`): min cos 0.634875 / 0.925502 / -0.638155 / 0.757021 / 0.927160 / -0.594803, pairs < 0:
 0 / 0 / 789 / 0 / 0 / 110, attn 4.555 / 4.676 / 4.758 / 2.245 / 1.881 / 1.856 ms (cause: AUDIT.md, Phase 1).
 
-Same code with every tile exact (`eps < 0`, pass 2 alone, f16 O), all pairs: lc_122880_1 mean cos 0.999505, min
+APA 0.3.0 with every tile exact (`eps < 0`, pass 2 alone, f16 O), all pairs: lc_122880_1 mean cos 0.999505, min
 0.974166; lc_122880_2 mean 0.993600, min 0.834726. `-DAPA_P2_F32O=1` (512-pair sample): lc_122880_1 cos
 1.000000, min 0.999997, 12.431 -> 17.339 ms. Deterministic: 5 reruns of prep + attention give bitwise identical
 outputs (`APA_DET=1`).
