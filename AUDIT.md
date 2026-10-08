@@ -153,3 +153,19 @@ the FP4 error of the remaining cold mass; the hot test bounds the FP4-estimated 
 | "with delta = 0 bitwise 0.2.0" | not measured bitwise; now "reproduces the 0.2.0 metrics to all six printed digits" |
 | "probabilities near 2^-20 of the sink" | was an estimate; replaced by measured "largest cold tile <= 0.0025" |
 | PPL corpus | both files named; imp 0.3.0 numbers (relayed, PERF_LOG) added with their setup |
+
+## Phase 3: sample-mode tables and paths on all pairs
+
+Runs: PERF_LOG "Phase 3 full mode". Accuracy and hot share are deterministic: every sample-mode cos / min / hot of the
+old Tables 4 / 5 reproduced exactly, so their times stay and the accuracy columns are replaced.
+
+| Item | Sample | All pairs | Change |
+|---|---|---|---|
+| Table 4, lc_122880_2 min, eps 0.001 / 0.003 / 0.01 / 0.02 | 0.967307 / 0.946039 / 0.944326 / 0.944326 | 0.926464 / 0.857105 / 0.834358 / 0.624999; < 0.9: 0 / 11 / 15 / 18 | paper Table 4 and text |
+| Table 4, lc_122880_1 / lc_32768_2 min over eps | >= 0.988660 / >= 0.981491 | >= 0.930447 / >= 0.928616, 0 pairs < 0.9 | paper Table 4 |
+| Table 5, APA min, 8192 .. 122880 keys | 0.996107 / 0.994661 / 0.988885 / 0.990023 / 0.997192 | 0.963431 / 0.950786 / 0.963669 / 0.949406 / 0.975775 | paper Table 5 (+ exact min) |
+| Paged (bs 16) vs flat, lc_122880_{1,2} | equal | equal to six digits | paper text |
+| Incremental vs full requant, lc_122880_2 | 0.822568 vs 0.944326 | 0.679235 / 275 < 0.9 vs 0.841302 / 14 | paper text, Limitations, README |
+| Incremental vs full requant, lc_122880_1 | 0.993415 vs 0.997192 | 0.974581 vs 0.975775, 0 < 0.9 | paper text |
+
+Open: 14 pairs < 0.9 (lc_122880_2, eps 0.005), 18 at eps 0.02; incremental cache adds 261 on the same dump.

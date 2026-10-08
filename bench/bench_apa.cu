@@ -129,6 +129,26 @@ int main(int argc, char** argv) {
     }
     return dot / std::sqrt(na * nb);
   };
+  // APA_FULL summary of the current O over all pairs (needs rall from the eps loop); for the paged / chunk paths
+  auto full_summary = [&](const char* tag) {
+    if (rall.empty()) return;
+    std::vector<T> ho(nq);
+    CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+    const size_t np = (size_t)n * nh;
+    double dot = 0, na = 0, nb = 0, csum = 0, cm = 1;
+    size_t b9 = 0, b0 = 0;
+    for (size_t i = 0; i < np; ++i) {
+      double d = 0, x = 0, y = 0;
+      for (int e = 0; e < hd; ++e) {
+        const double a = rall[i * hd + e], b = __half2float(ho[i * hd + e]);
+        d += a * b, x += a * a, y += b * b;
+      }
+      const double c = d / std::sqrt(x * y);
+      dot += d, na += x, nb += y, csum += c, cm = std::min(cm, c), b9 += c < 0.9, b0 += c < 0;
+    }
+    std::printf("  full %s: pooled cos %.6f mean cos %.6f min %.6f cos<0.9 %zu cos<0 %zu\n", tag,
+                dot / std::sqrt(na * nb), csum / np, cm, b9, b0);
+  };
   cudaEvent_t e0, e1;
   CK(cudaEventCreate(&e0));
   CK(cudaEventCreate(&e1));
@@ -429,6 +449,7 @@ int main(int argc, char** argv) {
     });
     double cmin;
     const double cf = accuracy(cmin);
+    full_summary("flat");
     const float tp = time([&] {
       if (!apa::prefill_paged(Q, kp, vp, dbt, bs, K + (size_t)off * row, V + (size_t)off * row, off, O, p, eps,
                               ws, wsb, 0))
@@ -437,6 +458,7 @@ int main(int argc, char** argv) {
     CK(cudaDeviceSynchronize());
     double cmin2;
     const double cp = accuracy(cmin2);
+    full_summary("paged");
     std::printf("paged bs %d eps %.0e: flat prep+attn %.3f ms cos %.6f min %.6f | paged %.3f ms cos %.6f min %.6f\n",
                 bs, eps, tf, cf, cmin, tp, cp, cmin2);
     CK(cudaFree(kp));
@@ -460,6 +482,7 @@ int main(int argc, char** argv) {
     });
     double cmin;
     const double cf = accuracy(cmin);
+    full_summary("full requant");
     void* sb;
     CK(cudaMalloc(&sb, apa::kv_state_bytes(1, nkv, 128, kv)));
     apa::KvState st = apa::kv_state_carve(sb, 1, nkv, 128, kv);
@@ -472,6 +495,7 @@ int main(int argc, char** argv) {
     CK(cudaDeviceSynchronize());
     double cmin2;
     const double ci = accuracy(cmin2);
+    full_summary("incremental");
     std::printf("chunks %d x %d eps %.0e: full requant %.2f ms cos %.6f min %.6f | incremental %.2f ms cos %.6f min %.6f\n",
                 nc, n, eps, tf, cf, cmin, ti, ci, cmin2);
     // stale cache: keys shifted by one token, q_offset == st.len: the fingerprint must force a full redo

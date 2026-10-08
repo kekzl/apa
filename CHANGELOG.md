@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Bench: `APA_FULL=1` also scores the `APA_PAGED` and `APA_CHUNKS` outputs over all pairs (`  full <path>` lines).
+- Paper tables eps / context length on all 49152 pairs (AUDIT.md, Phase 3). lc_122880_2 min cos at eps 0.001 /
+  0.003 / 0.01 / 0.02: 0.926464 / 0.857105 / 0.834358 / 0.624999 (sample: 0.967307 / 0.946039 / 0.944326 /
+  0.944326). Paged = flat on all pairs. Incremental tile cache, lc_122880_2, eps 0.005: min 0.679235, 275 pairs
+  < 0.9 (full requantization 0.841302, 14).
+
 ## 0.3.0 (2026-10-08)
 
 - Pass 1 cold frame: a hot tile lifts the running max of the cold accumulation to at most its own max - 32
