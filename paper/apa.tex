@@ -1,0 +1,320 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\eps}{\varepsilon}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{APA: Adaptive-Precision Attention\\
+\large Exact FP16 for the Few Tiles That Matter, FP4 for the Rest}
+\author{Raphael Friedmann\\\small\url{https://github.com/kekzl/apa}}
+\date{October 2026, APA 0.2.0}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+In long-context causal prefill, the softmax mass of a query row concentrates in a small number of key tiles.
+APA is a causal flash-attention prefill kernel for the RTX 5090 (sm\_120a) that exploits this: a first pass
+runs block-scaled FP4 attention (\code{mma.sync kind::mxf4nvf4}) over every 64-key tile and flags a tile as
+\emph{hot} when its share of the running row sum exceeds a threshold $\eps$. Hot tiles skip the FP4
+$PV$ product and are recomputed by a second pass in exact FP16; the two partial results are merged by a
+log-sum-exp. Both passes run in one fused launch with persistent pass-2 workers. On Llama-3.2-3B attention
+dumps at 122880 keys, APA at $\eps=0.005$ flags 6.0 to 10.4\,\% of active tiles as hot and runs in 4.506 to
+4.668\,ms, against 10.725\,ms for the same kernel with every tile exact (2.32$\times$). Integrated into the
+imp inference engine, dense prefill of a 106451-token prompt drops from 11659.35\,ms (FlashAttention-2) to
+6433.23\,ms (1.81$\times$), with perplexity below FlashAttention-2 with FP16 or FP32 accumulation on
+Llama-3.2-3B and Qwen3-8B. The kernel is deterministic (bitwise identical across reruns), supports GQA, paged
+KV caches and chunked prefill with an incremental tile cache, and is released as a header-only CUDA library
+under MPL-2.0.
+\end{abstract}
+
+\section{Introduction}
+
+Prefill cost of long prompts is dominated by attention: for a prompt of length $N$ the work is
+$O(N^2 d)$ while the rest of the model is $O(N d^2)$. FlashAttention \cite{dao2022flashattention,
+dao2024flashattention2,shah2024flashattention3} removes the memory bottleneck, but the arithmetic remains.
+Two families of methods attack it. \emph{Low-precision} attention \cite{zhang2025sageattention,
+zhang2025sageattention2,zhang2025sageattention3} computes $QK^\top$ and $PV$ in INT8, FP8 or FP4 with
+smoothing and fine-grained scales; it keeps every key but adds error to every score. \emph{Sparse}
+attention \cite{xiao2024streamingllm,jiang2024minference,tang2024quest} skips keys predicted to carry little
+mass; it is exact on the kept keys and wrong on the skipped ones.
+
+APA combines both at tile granularity and lets the data decide the split per query block. Every tile is
+computed cheaply in FP4, so no key is dropped. The few tiles that carry a large share of the row's softmax
+mass, where FP4 error would dominate the output, are routed to an exact FP16 pass. The decision is made
+online inside the FP4 pass from quantities the pass computes anyway, so it costs one extra small MMA per tile.
+
+Contributions:
+\begin{itemize}
+\item A two-pass attention scheme with an online hot-tile test whose cold verdicts are monotone safe: the
+  running row sum only grows, so a tile judged cold stays below $\eps$ of the final row sum (Section~\ref{sec:hot}).
+\item A pass-1 tile order (sink tile first, then the diagonal backwards) that puts high-mass tiles into the
+  running sum early, so the test judges middle tiles against a near-final denominator.
+\item An FP4 pass on sm\_120 block-scaled MMA with mean-centred K, per-16-key power-of-two $P$ scales folded
+  into the exponent, a lazy row maximum, and row sums obtained from the same quantized $P$ via an MMA
+  against a ones tile.
+\item A single fused launch: pass-1 CTAs followed by persistent pass-2 workers that pull work from ticket
+  counters and wait on per-query-block release flags, deadlock-free by ticket order.
+\item Deterministic statistics and an incremental tile cache for chunked prefill over paged KV.
+\end{itemize}
+
+\section{Background}
+
+\paragraph{Online softmax.} For a query row $q$ and keys $k_j$, flash attention keeps a running maximum $m$,
+row sum $\ell=\sum_j e^{s_j-m}$ and unnormalized output $o=\sum_j e^{s_j-m}v_j$, rescaling $\ell$ and $o$
+when $m$ grows \cite{milakov2018online,rabe2021selfattention}. Two partial states $(m_1,\ell_1,o_1)$ and
+$(m_2,\ell_2,o_2)$ over disjoint key sets merge exactly:
+\begin{equation}
+M=\max(m_1,m_2),\quad w_i=e^{m_i-M},\quad O=\frac{w_1o_1+w_2o_2}{w_1\ell_1+w_2\ell_2}.
+\label{eq:merge}
+\end{equation}
+APA uses this to merge the FP4 result over cold tiles with the FP16 result over hot tiles. All exponentials
+run in the $\log_2$ domain (\code{ex2.approx}).
+
+\paragraph{Block-scaled FP4 on sm\_120.} The RTX 5090 executes
+block-scaled MMA (\code{mma.sync}, \code{kind::mxf4nvf4}, m16n8k64) with E2M1 operands and one UE4M3 scale per 16 elements
+along $k$ (NVFP4, a variant of the OCP microscaling formats \cite{rouhani2023microscaling}). E2M1 represents
+$\{0,\pm0.5,\pm1,\pm1.5,\pm2,\pm3,\pm4,\pm6\}$; UE4M3 has a maximum of 448. APA additionally uses a global FP32
+scale per head so that $|x|_{\max}$ maps to $6\cdot448=2688$.
+
+\section{Method}
+
+APA computes causal attention for head dim $d=128$ with GQA ($H$ query heads, $H_{kv}$ KV heads,
+$G=H/H_{kv}$). Keys are split into tiles of $B_{kv}=64$. Query rows of the $G$ heads sharing a KV head are
+\emph{packed}: packed row $r$ is position $\lfloor r/G\rfloor$ of query head $h_{kv}G+(r\bmod G)$, so one CTA
+of 12 warps covers $12\cdot16=192$ packed rows and loads each KV tile once for all $G$ heads.
+
+\subsection{Preparation}
+
+A prep stage converts FP16 inputs into the FP4 layout (Table~\ref{tab:prep}).
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lp{0.68\columnwidth}@{}}
+\toprule
+Step & Output \\
+\midrule
+stats & per (batch, KV head): K column sums per chunk of 16 tiles, K and V absolute maxima \\
+finalize & K mean $\bar k$ (chunks summed in order), head scales $g_k$, $g_v$ \\
+KV quant & per tile a 9216\,B blob: K (mean-centred) and $V^\top$ in E2M1, one UE4M3 scale per 16 values \\
+Q quant & packed Q rows in E2M1 with UE4M3 scales; $q\cdot\bar k$ kept for pass 2 \\
+\bottomrule
+\end{tabular}
+\caption{Prep kernels. Blob = K 4096\,B, $V^\top$ 4096\,B, K scales 512\,B, V scales 512\,B, laid out for
+conflict-free \code{ldmatrix} (XOR swizzle) and for one bulk copy per tile.}
+\label{tab:prep}
+\end{table}
+
+\paragraph{Mean-centred K.} Subtracting the per-channel key mean, $s_j=q\cdot(k_j-\bar k)$, shifts every
+score of a row by the same constant $q\cdot\bar k$ and leaves the softmax unchanged
+\cite{zhang2025sageattention}. It removes the shared channel offset that would otherwise consume FP4 range.
+Pass 2 computes exact scores $q\cdot k_j$ from the original FP16 keys and subtracts $q\cdot\bar k$, so both
+passes share one logit frame and Eq.~\eqref{eq:merge} applies.
+
+\subsection{Pass 1: FP4 attention with a hot-tile test}
+\label{sec:hot}
+
+Each warp owns 16 packed rows; a CTA of 12 warps streams the tile blobs through a 6-stage shared-memory ring
+filled by \code{cp.async.bulk} with mbarrier completion (thread 0 is the producer). Per tile and warp:
+
+\begin{figure}[t]
+\small
+\begin{enumerate}\setlength{\itemsep}{1pt}
+\item $S \gets \mathrm{MMA_{fp4}}(Q, K_t)$; apply causal / tail mask
+\item update lazy row max $m$ (only if a score exceeds $m+\tau$)
+\item per 16-key group: power-of-two scale $2^{k}$, $P' \gets 2^{s c + b}$ with $P'\le6$
+\item $\ell_t \gets \mathrm{MMA_{fp4}}(P', \mathbf{1})$ \hfill tile row sums
+\item $\lambda \gets \lambda + \ell_t$ \hfill running sum, all tiles
+\item if any row has $\ell_t > \eps\,\lambda$: set bit $t$ in the warp's hot mask, stop
+\item $\ell_{\text{cold}} \gets \ell_{\text{cold}} + \ell_t$;\; $o \gets o + \mathrm{MMA_{fp4}}(P', V_t)$
+\end{enumerate}
+\caption{Pass 1, one tile $t$ of one warp.}
+\label{alg:pass1}
+\end{figure}
+
+\paragraph{P quantization.} The probabilities of a 16-key group are scaled by $1536/2^k$ with
+$2^k\ge256\cdot\max_{\text{group}}P$, so the quantized values satisfy $P'\le6$ and the scale $2^k$ is an
+exact UE4M3 power of two. The shift is folded into the bias of the exponent, so \code{ex2} directly produces
+$P'$; the global factor 1536 is divided out in the epilogue.
+
+\paragraph{Lazy maximum.} The running maximum $m$ (log$_2$ domain) is updated, with a full quad reduction
+and a rescale of $o$, $\ell_{\text{cold}}$ and $\lambda$, only when some score exceeds $m+\tau$ with
+$\tau=4$. The bias absorbs the lag, so $P'\le6$ still holds; most tiles skip the rescale.
+
+\paragraph{Row sums from the quantized P.} Instead of summing FP32 probabilities, pass 1 multiplies the packed
+$P'$ fragment by a tile of E2M1 ones. The resulting row sums are those of the values that enter $PV$, so
+numerator and denominator of the cold partial carry the same quantization.
+
+\paragraph{The hot test.} $\lambda$ accumulates the sums of \emph{all} tiles seen so far, hot ones included,
+while $\ell_{\text{cold}}$ and $o$ accumulate only cold ones. A tile is hot for the warp if, for any of its
+16 rows, its row sum exceeds $\eps\lambda$. Since $\lambda$ only grows over the KV loop (up to the common
+rescale), a cold tile's share of the final row sum is at most its share at test time, so every cold verdict
+remains valid. A hot verdict can be conservative; it costs pass-2 work, not accuracy. The test is
+warp-uniform (\code{\_\_any\_sync}), so the hot mask has one bit per (warp, tile).
+
+\paragraph{Tile order.} The denominator $\lambda$ is small early in the loop, which makes early tiles look
+hot. Pass 1 therefore visits tile 0 first (the attention sink \cite{xiao2024streamingllm}), then the
+remaining tiles from the causal diagonal backwards. The tiles that typically carry most mass enter $\lambda$
+first, and the long middle range is judged against a near-final sum.
+
+\paragraph{Epilogue.} A warp without hot tiles normalizes and stores its output directly. A warp with hot
+tiles exports $(m,\ell_{\text{cold}})$ and the unnormalized cold partial $o$ in FP32 for the merge.
+
+\subsection{Pass 2: exact FP16 over hot tiles}
+
+A pass-2 group of 4 warps takes the same packed rows as 4 consecutive pass-1 warps. It streams the union of
+their hot tiles from the original FP16 K and V (flat or paged), double-buffered with \code{cp.async}: $K_{t+1}$
+loads under $PV_t$, $V_{t+1}$ under $QK_{t+1}$. Each warp computes only its own hot tiles with
+\code{mma.sync.m16n8k16} (f16 inputs, f16 accumulation, the default of imp's FlashAttention-2 path) and an
+FP32 online softmax in the $\log_2$ domain. At the end each row is merged with its pass-1 partial by
+Eq.~\eqref{eq:merge} and written to $O$.
+
+\subsection{Fused launch}
+
+Both passes run in one launch of $n_1+n_{\text{SM}}$ CTAs of 384 threads, where $n_1$ is the number of
+(batch, KV head, query block) pass-1 items. Each CTA takes a ticket from an atomic counter. Tickets below
+$n_1$ run pass 1 (causal: heaviest query blocks first); the rest become persistent pass-2 workers whose
+three 4-warp groups pull (query block, sub-group) items from a second counter. A pass-2 group spins on its
+query block's ready flag, which the pass-1 CTA sets with a release store after a fence; the worker reads it
+with acquire semantics. Tickets are handed to CTAs in the order they start running, so every pass-1 item a
+worker waits on is already resident: the scheme cannot deadlock. Pass-2 work fills the SMs left idle by
+pass 1's last wave.
+
+\subsection{Determinism}
+
+All floating-point reductions run in a fixed order. In 0.1.0 the K column sums used shared and global float
+atomics; 5 reruns of prep and attention on the three dumps differed in 539072, 1329742 and 950802 output
+elements. In 0.2.0 each 16-tile chunk sums its columns in registers, then by XOR shuffles, then over warps in
+order, and the finalize kernel sums chunks in order. Maxima use integer \code{atomicMax}, which is
+order-independent. The same 5 reruns now give bitwise identical outputs; prep time fell from 0.865 to
+0.731\,ms at 122880 keys.
+
+\subsection{Paged KV and chunked prefill}
+
+Pass 2 reads K/V through a reader abstraction: flat \code{[B][S][H\_kv][d]} or a paged FP16 pool through a
+block table \cite{kwon2023pagedattention}, plus a flat tail for the chunk not yet in the cache. For chunked
+prefill, \code{prefill\_incremental} keeps a per-layer \code{KvState} with the quantized tile blobs and
+statistics; a new chunk quantizes only its new keys. Head scales are widened by a headroom factor so later
+keys fit, and a fingerprint of 48 key values detects a stale cache and triggers a full requantization.
+
+\section{Evaluation}
+
+\paragraph{Setup.} RTX 5090 (sm\_120a), CUDA $\ge$ 12.9. Standalone runs use attention inputs dumped from
+Llama-3.2-3B \cite{grattafiori2024llama3} (24 query heads, 8 KV heads, $d=128$): 2048 query rows against
+122880 keys, three dumps. Accuracy is the cosine similarity against an
+FP32 reference on 512 sampled (row, head) pairs; we report mean and minimum. Times are the minimum over 5
+repetitions of the mean of 5 launches (CUDA events). Hot share is the fraction of active (warp, tile) pairs
+flagged hot.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Dump & cos mean & cos min & hot & attn ms & prep ms \\
+\midrule
+lc\_122880\_0 & 0.999000 & 0.898838 & 10.4\,\% & 4.506 & 0.730 \\
+lc\_122880\_1 & 0.999626 & 0.970893 & 9.7\,\% & 4.615 & 0.731 \\
+lc\_122880\_2 & 0.997437 & $-0.444615$ & 6.0\,\% & 4.668 & 0.730 \\
+\bottomrule
+\end{tabular}
+\caption{Standalone, $\eps=0.005$, 2048 queries at 122880 keys. With every tile exact ($\eps<0$),
+lc\_122880\_1 takes 10.725\,ms at cos mean 0.999634.}
+\label{tab:standalone}
+\end{table}
+
+\paragraph{Standalone.} Table~\ref{tab:standalone}: at $\eps=0.005$ between 6.0 and 10.4\,\% of the active
+warp-tiles go to pass 2. Against the same code with every tile exact, APA is 2.32$\times$ faster on
+lc\_122880\_1 (4.615 vs 10.725\,ms) at a mean cosine of 0.999626 vs 0.999634. Prep adds 0.731\,ms
+(prep and attention together: 5.346\,ms).
+
+
+\paragraph{End to end.} APA is integrated into imp \cite{imp} behind \code{attention.apa\_eps}. Llama-3.2-3B
+Q8\_0, 106451-token prompt, \code{-{}-max-seq-len 108000}, prefill time:
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Mode & FA2 ms & APA ms & speedup \\
+\midrule
+default (sparse prefill) & 6661.95 & 5241.18 & 1.27$\times$ \\
+dense & 11659.35 & 6433.23 & 1.81$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{imp prefill, $\eps=0.005$. Dense: \code{sparse\_prefill\_topk\_tokens=0}. Speedup covers the whole
+prefill, not only attention.}
+\label{tab:imp}
+\end{table}
+
+\paragraph{Perplexity.} Table~\ref{tab:ppl}, imp on ppl\_corpus\_45k (13k to 14k tokens) for Llama-3.2-3B
+and Qwen3-8B \cite{yang2025qwen3} in Q8\_0. The two FlashAttention-2 variants differ only in the
+accumulation type and span 17.3644 to 17.3732 (Llama) and 10.7974 to 10.8110 (Qwen). Every APA setting with
+$\eps>0$ lies below both; the all-exact run is 0.0009 above FA2 f32 on Llama. Raising $\eps$ from 0.002 to 0.01 cuts default-mode prefill from 5915.15 to
+4863.56\,ms. APA 0.2.0 reproduces the 0.1.0 values at $\eps=0.005$ exactly; the 0.002 and 0.01 rows were
+measured with 0.1.0.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Variant & Llama 3B & Qwen3 8B & prefill ms \\
+\midrule
+FA2, f16 acc. & 17.3644 & 10.7974 & 6661.95 \\
+FA2, f32 acc. & 17.3732 & 10.8110 & \\
+APA, all exact & 17.3741 & 10.7868 & \\
+APA $\eps=0.002$ & 17.3556 & 10.7855 & 5915.15 \\
+APA $\eps=0.005$ & 17.3423 & 10.7869 & 5241.18 \\
+APA $\eps=0.01$ & 17.3385 & 10.7728 & 4863.56 \\
+\bottomrule
+\end{tabular}
+\caption{Perplexity (lower is better) and default-mode prefill time of the 106451-token prompt (Llama).}
+\label{tab:ppl}
+\end{table}
+
+\section{Limitations}
+
+\begin{itemize}
+\item \textbf{Worst-case rows.} On lc\_122880\_2 one sampled row reaches a cosine of $-0.444615$ while the
+  mean stays at 0.997437. The hot test bounds each cold tile's share by $\eps$, not the sum of many cold
+  tiles' FP4 errors. The cause of this row is not yet analysed.
+  Perplexity does not show it; per-row guarantees need a stronger test, for example a bound on the
+  accumulated cold mass.
+\item \textbf{Granularity.} The hot verdict is per (warp, tile): one row of 16 makes the tile exact for all.
+\item \textbf{Scope.} Head dim 128, causal, FP16 inputs, sm\_120a only. Pass 2 of the fused kernel is
+  specialised for $d=128$.
+\item \textbf{Fixed $\eps$.} One global threshold; a per-layer or per-head $\eps$ is not explored.
+\item \textbf{Baselines.} Speedups are against an all-exact run of the same kernel and against imp's
+  FlashAttention-2. A direct comparison with FP4 attention kernels such as SageAttention3
+  \cite{zhang2025sageattention3} on the same inputs is open.
+\end{itemize}
+
+\section{Related work}
+
+FlashAttention \cite{dao2022flashattention,dao2024flashattention2,shah2024flashattention3} established
+IO-aware exact attention; FlashAttention-3 adds FP8 on Hopper. SageAttention
+\cite{zhang2025sageattention,zhang2025sageattention2,zhang2025sageattention3} quantizes Q, K, P, V to INT8,
+INT4, FP8 and FP4 with K smoothing by mean subtraction, which APA adopts; it applies one precision to every
+tile. StreamingLLM \cite{xiao2024streamingllm} keeps sink and recent tokens, MInference
+\cite{jiang2024minference} predicts sparse patterns for prefill, Quest \cite{tang2024quest} selects pages by
+query-aware bounds for decode. These skip keys; APA keeps every key and spends precision instead of
+dropping work, with the split decided online from the FP4 pass itself.
+
+\section{Conclusion}
+
+Long-context attention is skewed enough that exact arithmetic on 6 to 10\,\% of the tiles, FP4 on the rest,
+and an exact log-sum-exp merge reach the perplexity of FP16 attention at 2.32$\times$ the speed of an
+all-exact kernel and 1.81$\times$ dense prefill speedup end to end. The code is available at
+\url{https://github.com/kekzl/apa} under MPL-2.0.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

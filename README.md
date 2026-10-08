@@ -75,4 +75,4 @@ Dump format: `int32 n, kv, nh, nkv, hd, off` then FP16 `Q [n][nh][hd]`, `K [kv][
 
 [MPL-2.0](LICENSE): file-level copyleft. Modified APA files stay MPL-2.0 and keep their license header; APA
 can be combined with code under other licenses. Credit as given in [NOTICE](NOTICE); citation metadata in
-[CITATION.cff](CITATION.cff).
+[CITATION.cff](CITATION.cff). Paper: [paper/apa.pdf](paper/apa.pdf) (source `paper/apa.tex`, build `sh paper/build.sh`).
