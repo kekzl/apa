@@ -200,6 +200,19 @@ int main(int argc, char** argv) {
                 "  (prep %.3f ms)\n",
                 eps, c, cmin, 100 * hot / act, 100 * chot / cact, ta, t2, flops / ta * 1e-9, tprep);
   }
+  // APA_DET=1: prep + attention 5x at the last eps, outputs compared bitwise with the first run.
+  if (std::getenv("APA_DET")) {
+    std::vector<T> h0(nq), h1(nq);
+    size_t diff = 0;
+    for (int run = 0; run < 5; ++run) {
+      CK(apa::prep(Q, akv, p, w, 0));
+      CK(apa::attn(Q, K, V, O, p, w, epss.back(), 0));
+      CK(cudaMemcpy(run ? h1.data() : h0.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+      if (run)
+        for (size_t i = 0; i < nq; ++i) diff += __half_as_ushort(h0[i]) != __half_as_ushort(h1[i]);
+    }
+    std::printf("determinism: %zu of %zu output elements differ over 4 reruns\n", diff, 4 * nq);
+  }
   // APA_PAGED=bs: keys [0, off) from a paged pool (blocks shuffled), [off, kv) flat as the tail (imp's chunk);
   // prefill_paged vs flat prefill (prep + attn) at the last eps.
   if (const char* e = std::getenv("APA_PAGED")) {
