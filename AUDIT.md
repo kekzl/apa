@@ -139,3 +139,4 @@ the FP4 error of the remaining cold mass; the hot test bounds the FP4-estimated 
 | 2.50x / 2.32x | paper, README 0.2.0 text | attention only, prep excluded; with prep 2.196 / 2.006 |
 | apa_pass2.cuh:6 "f16 x f16 -> f32" | code comment | fixed in phase 1: "f16 accumulate" |
 | Proposition | paper 3.2 | holds for FP4 estimates of l_t and lambda |
+| PPL table "ppl_corpus_45k" | README, paper Table 7 | name the file: ppl_corpus_45k_gemma4_turn.txt (chat-turn wrapped), differs from imp ppl_corpus_45k.txt (plain); with chunk 2048 and apa_min_kv 8192 APA only runs on chunks with kv >= 8192 |

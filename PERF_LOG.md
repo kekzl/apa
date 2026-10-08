@@ -1180,3 +1180,9 @@ PPL ppl_corpus_45k Llama 18.2760 -> 18.2836, Qwen3-8B 10.7522 -> 10.7549; Qwen3-
 
 Note: Llama FA2 PPL here 18.2760 vs 17.3644 / 17.3732 in the README 0.2.0 table (same corpus name); setup
 difference not known from this repo, to clarify with ra2-15 before any README use.
+
+Clarification (ra2-15, relayed): different corpora. README 0.2.0 PPL (17.3644 / 10.7974) = /models/ppl_corpus_45k_gemma4_turn.txt
+(46359 bytes, chat-turn wrapped). Entry above (18.2760 / 10.7522) = imp tools/analysis/ppl_corpus_45k.txt = /models/ppl_45k.txt
+(44994 bytes, plain; Llama 12806 tok, Qwen3-8B 13537 tok; imp verify.sh drift-gate baseline 10.7522). Both: imp-cli
+--perplexity, chunk 2048, default sparse prefill (inactive at these lengths). apa_eps 0 = APA off = FA2 (fa2_fp16qk);
+APA rows apa_eps 0.005 / 0.01 / 0.02, apa_min_kv 8192, tile cache off.
