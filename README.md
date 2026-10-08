@@ -16,18 +16,26 @@ then the diagonal backwards.
 
 ## Results
 
-Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880, 24 / 8 heads), eps 0.005, cos vs FP32:
+Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24 / 8 heads), eps 0.005, cos vs FP32
+(512 sampled rows):
 
 | Dump | cos mean | cos min | hot tiles | attn ms | prep ms |
 |---|---|---|---|---|---|
-| lc_122880_0 | 0.999000 | 0.898838 | 10.4 % | 4.506 | 0.730 |
-| lc_122880_1 | 0.999626 | 0.970893 | 9.7 % | 4.615 | 0.731 |
-| lc_122880_2 | 0.997437 | -0.444615 | 6.0 % | 4.668 | 0.730 |
+| lc_122880_0 | 0.999484 | 0.969733 | 10.3 % | 4.686 | 0.735 |
+| lc_122880_1 | 0.999791 | 0.997192 | 9.6 % | 4.707 | 0.731 |
+| lc_122880_2 | 0.999400 | 0.944326 | 6.0 % | 4.977 | 0.733 |
+| lc_32768_0 | 0.999634 | 0.967587 | 39.5 % | 2.280 | 0.162 |
+| lc_32768_1 | 0.999906 | 0.996628 | 23.6 % | 1.891 | 0.161 |
+| lc_32768_2 | 0.999787 | 0.987198 | 17.5 % | 1.896 | 0.161 |
 
-Same code with every tile exact (`eps < 0`): lc_122880_1 10.725 ms, cos 0.999634. Deterministic: 5 reruns of prep +
+APA 0.2.0 on the same run: cos min 0.898838 / 0.970893 / -0.444615 / 0.879942 / 0.984021 / 0.100775 at equal
+speed (hot sink pushed cold P below the FP4 scale floor, see CHANGELOG 0.3.0).
+
+Same code with every tile exact (`eps < 0`): lc_122880_1 12.431 ms, cos 0.999634 (f16 O); `-DAPA_P2_F32O=1`:
+17.339 ms, cos 1.000000, min 0.999997. Deterministic: 5 reruns of prep +
 attention give bitwise identical outputs (`APA_DET=1`).
 
-In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`), Llama-3.2-3B Q8_0, 106451-token prompt,
+In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`, APA 0.2.0), Llama-3.2-3B Q8_0, 106451-token prompt,
 `--max-seq-len 108000`, prefill ms:
 
 | Mode | FA2 | APA eps 0.005 |
@@ -35,7 +43,8 @@ In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`), Llama-3.2-3B Q8_0,
 | default (sparse prefill) | 6661.95 | 5241.18 |
 | dense (`sparse_prefill_topk_tokens=0`) | 11659.35 | 6433.23 |
 
-Perplexity (imp, ppl_corpus_45k, 13-14k tokens; APA 0.2.0 repeats exactly, the eps 0.002 / 0.01 rows are 0.1.0):
+Perplexity, APA 0.2.0, not yet re-measured for 0.3.0 (imp, ppl_corpus_45k, 13-14k tokens; 0.2.0 repeats 0.1.0
+exactly, the eps 0.002 / 0.01 rows are 0.1.0):
 
 | Variant | Llama-3.2-3B Q8_0 | Qwen3-8B Q8_0 | default-mode prefill ms |
 |---|---|---|---|
@@ -68,6 +77,9 @@ Perplexity (imp, ppl_corpus_45k, 13-14k tokens; APA 0.2.0 repeats exactly, the e
 | Paged path | `APA_PAGED=16` (block size) |
 | Chunked prefill + tile cache | `APA_CHUNKS=1` |
 | Determinism (5 reruns, bitwise) | `APA_DET=1` |
+| Worst sampled row: norms, V cancellation, hot/cold mass | `APA_DIAG=1` |
+| Pass-2 O in fp32 across tiles (exactness studies) | `NVFLAGS=-DAPA_P2_F32O=1 sh bench/build.sh` |
+| APA 0.2.0 cold frame (A/B) | `NVFLAGS=-DAPA_HOT_DROP=0 sh bench/build.sh` |
 
 Dump format: `int32 n, kv, nh, nkv, hd, off` then FP16 `Q [n][nh][hd]`, `K [kv][nkv][hd]`, `V [kv][nkv][hd]`.
 

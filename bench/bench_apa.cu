@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
   CK(cudaDeviceSynchronize());
   std::vector<float> hr((size_t)ns * hd);
   CK(cudaMemcpy(hr.data(), ref, hr.size() * 4, cudaMemcpyDeviceToHost));
+  int worst = 0;  // sample index of the last cmin (APA_DIAG)
   auto accuracy = [&](double& cmin) {
     std::vector<T> ho(nq);
     CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
@@ -122,7 +123,7 @@ int main(int argc, char** argv) {
         const double a = hr[(size_t)i * hd + e], b = __half2float(ho[((size_t)rows[i].x * nh + rows[i].y) * hd + e]);
         d += a * b, x += a * a, y += b * b;
       }
-      cmin = std::min(cmin, d / std::sqrt(x * y));
+      if (d / std::sqrt(x * y) < cmin) cmin = d / std::sqrt(x * y), worst = i;
       dot += d, na += x, nb += y;
     }
     return dot / std::sqrt(na * nb);
@@ -199,6 +200,50 @@ int main(int argc, char** argv) {
     std::printf("apa eps %8.0e: cos %.6f min %.6f  hot %5.1f %% p2cta %5.1f %%  attn %.3f ms (pass2 %.3f) %.1f TOPS"
                 "  (prep %.3f ms)\n",
                 eps, c, cmin, 100 * hot / act, 100 * chot / cact, ta, t2, flops / ta * 1e-9, tprep);
+    // APA_DIAG=1: worst sampled row (min cos): norms, V cancellation, tile mass split by the warp's hot mask.
+    if (std::getenv("APA_DIAG")) {
+      CK(apa::attn(Q, K, V, O, p, w, eps, 0));
+      double cm;
+      accuracy(cm);
+      const int s = rows[worst].x, h = rows[worst].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
+      std::vector<float> sc(nrow);
+      CK(cudaMemcpy(sc.data(), scr + (size_t)worst * kv, nrow * 4, cudaMemcpyDeviceToHost));
+      std::vector<T> orow(hd);
+      CK(cudaMemcpy(orow.data(), O + ((size_t)s * nh + h) * hd, hd * 2, cudaMemcpyDeviceToHost));
+      const int r = s * G + h % G, wi = (hkv * w.nqb + r / 192) * 12 + (r % 192) / 16;
+      double l = 0;
+      for (int j = 0; j < nrow; ++j) l += sc[j];
+      std::vector<double> cold(hd, 0.0), hotv(hd, 0.0);
+      double pvn = 0, mtop = 0, mhot = 0, mcold_big = 0;
+      int nhot = 0, nbig = 0;
+      for (int t = 0; t * 64 < nrow; ++t) {
+        const bool ht = (hm[wi * w.W + t / 32] >> (t % 32)) & 1u;
+        double mt = 0;
+        for (int j = t * 64; j < std::min(nrow, t * 64 + 64); ++j) {
+          const double pj = sc[j] / l;
+          double vn = 0;
+          for (int e = 0; e < hd; ++e) {
+            const double v = __half2float(hv[((size_t)j * nkv + hkv) * hd + e]);
+            vn += v * v;
+            (ht ? hotv : cold)[e] += pj * v;
+          }
+          pvn += pj * std::sqrt(vn);
+          mt += pj;
+        }
+        mtop = std::max(mtop, mt);
+        nhot += ht, mhot += ht ? mt : 0;
+        if (mt > 0.005) ++nbig, mcold_big += ht ? 0 : mt;
+      }
+      double rn = 0, on = 0, dn = 0, cn = 0, hn = 0;
+      for (int e = 0; e < hd; ++e) {
+        const double a = hr[(size_t)worst * hd + e], b = __half2float(orow[e]);
+        rn += a * a, on += b * b, dn += (a - b) * (a - b), cn += cold[e] * cold[e], hn += hotv[e] * hotv[e];
+      }
+      std::printf("  diag s %d h %d cos %.4f |ref| %.4f |out| %.4f relerr %.3f |ref|/sum p|v| %.4f top tile %.3f "
+                  "hot %d tiles mass %.3f |hot pv| %.4f |cold pv| %.4f, tiles > 0.005: %d (cold mass %.3f)\n",
+                  s, h, cm, std::sqrt(rn), std::sqrt(on), std::sqrt(dn / rn), std::sqrt(rn) / pvn, mtop, nhot,
+                  mhot, std::sqrt(hn), std::sqrt(cn), nbig, mcold_big);
+    }
   }
   // APA_DET=1: prep + attention 5x at the last eps, outputs compared bitwise with the first run.
   if (std::getenv("APA_DET")) {

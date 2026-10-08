@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 (2026-10-08)
+
+- Pass 1 cold frame: a hot tile lifts the running max of the cold accumulation to at most its own max - 32
+  (log2, `APA_HOT_DROP`). Before, a hot sink set the frame and cold P fell below the UE4M3 scale floor
+  (2^-6) to E2M1 zero: the worst row (lc_122880_2 s 190 h 20) lost its whole cold part (|out| 0.2531 =
+  |hot pv| 0.2527, |ref| 0.1670). eps 0.005, cos min over 6 dumps: -0.444615 / 0.100775 / 0.879942 /
+  0.898838 / 0.970893 / 0.984021 -> 0.944326 / 0.987198 / 0.967587 / 0.969733 / 0.997192 / 0.996628.
+  Speed equal within noise; paged path same accuracy; incremental min -0.431078 -> 0.822568; deterministic.
+- `APA_P2_F32O=1` (default 0): pass-2 O in fp32 across tiles, f16 per 16-token k-step. All-exact cos
+  lc_122880_0 0.996468 -> 0.999998, lc_122880_2 min 0.876635 -> 0.999939; attn +8 to 25 % at eps 0.005
+  (register spills) with no accuracy gain there.
+- Bench: `APA_DIAG=1` prints the worst sampled row (norms, V cancellation, hot / cold mass).
+- imp perplexity and prefill numbers in the README are 0.2.0 (not yet re-measured).
+
 ## 0.2.0 (2026-10-08)
 
 - Deterministic: K column sums per 16-tile chunk in a fixed order (registers, xor shuffles, warps in order,
