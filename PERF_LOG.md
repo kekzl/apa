@@ -1166,3 +1166,17 @@ full eps    5e-03: pairs 49152 pooled cos 0.999778 mean cos 0.999372 min 0.96977
   top 18 s  223 h 18 qb  3 warp 2345 cos 0.980046 relL2 0.2175 | hot    2/ 484 merge | fp32: cold mass 0.0777 max tile 0.9064 max cold tile 0.0018 cold tiles > eps 0 n90 1 |cold pv|/|ref| 1.973 | spread K 3.4 Q 4.0
   top 19 s 1481 h 17 qb 23 warp 2197 cos 0.980115 relL2 0.2053 | hot   46/ 504 merge | fp32: cold mass 0.0687 max tile 0.8838 max cold tile 0.0035 cold tiles > eps 0 n90 5 |cold pv|/|ref| 0.683 | spread K 2.8 Q 9.7
 ```
+
+## 2026-10-08 imp prefill / PPL on APA e71624b (measured by session ra2-15, relayed message, no log here)
+
+```
+default sparse prefill apa_eps 0 -> 0.01 (min_kv 8192), mean of 2:
+Llama-3.2-3B 106451 tok 6746.01 -> 4824.90 ms
+Qwen3-4B-2507 112280 tok 8802.52 -> 6969.61 ms
+Qwen3-8B 33727 tok 3227.40 -> 2848.55 ms
+Qwen3-14B Q6_K 33727 tok 5608.78 -> 5191.51 ms
+PPL ppl_corpus_45k Llama 18.2760 -> 18.2836, Qwen3-8B 10.7522 -> 10.7549; Qwen3-14B long8_32k 2.5249 -> 2.5248
+```
+
+Note: Llama FA2 PPL here 18.2760 vs 17.3644 / 17.3732 in the README 0.2.0 table (same corpus name); setup
+difference not known from this repo, to clarify with ra2-15 before any README use.
