@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 #define CK(x)                                                                         \
@@ -192,6 +193,14 @@ int main(int argc, char** argv) {
     CK(cudaDeviceSynchronize());
     double cmin;
     const double c = accuracy(cmin);
+    if (const char* fo = std::getenv("APA_OUT")) {  // raw O of this eps (bitwise A/B of kernel variants)
+      std::vector<T> ho(nq);
+      CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+      if (FILE* g = std::fopen((std::string(fo) + "_" + std::to_string(eps)).c_str(), "wb")) {
+        std::fwrite(ho.data(), 2, nq, g);
+        std::fclose(g);
+      }
+    }
     // hot share: set bits over active (warp, tile) pairs
     const size_t nw = (size_t)nkv * w.nqb * 12, words = nw * w.W;
     std::vector<uint32_t> hm(words);
@@ -206,22 +215,60 @@ int main(int argc, char** argv) {
       act += nt;
       for (int t = 0; t < nt; ++t) hot += (hm[wi * w.W + t / 32] >> (t % 32)) & 1u;
     }
-    // pass-2 CTA union share: tiles hot for any of 4 consecutive warps (APA_P2W) over active pairs
+    // pass-2 load share: tiles hot for any of the 12 warps of a q block (pass2_cta stream) over active pairs
     double chot = 0, cact = 0;
-    for (size_t ci = 0; ci < nw / 4; ++ci) {
-      const int qb = (int)((ci / 3) % w.nqb), row0 = qb * 192 + (int)(ci % 3) * 64;
+    for (size_t ci = 0; ci < nw / 12; ++ci) {
+      const int qb = (int)(ci % w.nqb), row0 = qb * 192;
       if (row0 >= R) continue;
-      const int pmax = off + (std::min(row0 + 64, R) - 1) / G, nt = std::min(pmax / 64 + 1, (kv + 63) / 64);
+      const int pmax = off + (std::min(row0 + 192, R) - 1) / G, nt = std::min(pmax / 64 + 1, (kv + 63) / 64);
       cact += nt;
       for (int t = 0; t < nt; ++t) {
         uint32_t u = 0;
-        for (int i = 0; i < 4; ++i) u |= hm[(ci * 4 + i) * w.W + t / 32];
+        for (int i = 0; i < 12; ++i) u |= hm[(ci * 12 + i) * w.W + t / 32];
         chot += (u >> (t % 32)) & 1u;
       }
     }
+    // APA_UNION=1: union share over groups of gs consecutive warps of a CTA (tiles loaded per group / active pairs)
+    if (std::getenv("APA_UNION")) {
+      std::printf("union eps %8.0e:", eps);
+      for (int gs : {1, 2, 3, 4, 6, 12}) {
+        double uh = 0, ua = 0;
+        for (size_t ci = 0; ci < nw / gs; ++ci) {
+          const int qb = (int)((ci * gs / 12) % w.nqb), row0 = qb * 192 + (int)(ci * gs % 12) * 16;
+          if (row0 >= R) continue;
+          const int pmax = off + (std::min(row0 + 16 * gs, R) - 1) / G, nt = std::min(pmax / 64 + 1, (kv + 63) / 64);
+          ua += nt;
+          for (int t = 0; t < nt; ++t) {
+            uint32_t u = 0;
+            for (int i = 0; i < gs; ++i) u |= hm[(ci * gs + i) * w.W + t / 32];
+            uh += (u >> (t % 32)) & 1u;
+          }
+        }
+        std::printf("  %d: %5.1f %%", gs, 100 * uh / ua);
+      }
+      // per q block: own tiles of the busiest warp and of the busiest SMSP (warps w, w+4, w+8) vs the 12-warp union
+      double su = 0, sa = 0, sm = 0, ss = 0;
+      for (size_t qi = 0; qi < nw / 12; ++qi) {
+        int own[12] = {0}, un = 0;
+        for (int t = 0; t < (kv + 63) / 64; ++t) {
+          uint32_t u = 0;
+          for (int i = 0; i < 12; ++i) {
+            const uint32_t bit = (hm[(qi * 12 + i) * w.W + t / 32] >> (t % 32)) & 1u;
+            own[i] += bit, u |= bit;
+          }
+          un += u;
+        }
+        int mw = 0, ms = 0, tot = 0;
+        for (int i = 0; i < 12; ++i) mw = std::max(mw, own[i]), tot += own[i];
+        for (int s = 0; s < 4; ++s) ms = std::max(ms, own[s] + own[s + 4] + own[s + 8]);
+        su += un, sa += tot / 12.0, sm += mw, ss += ms;
+      }
+      std::printf("  | per q block: union %.0f, own avg %.0f max %.0f, busiest SMSP %.0f\n", su / (nw / 12),
+                  sa / (nw / 12), sm / (nw / 12), ss / (nw / 12));
+    }
     const float ta = time([&] { CK(apa::attn(Q, K, V, O, p, w, eps, 0)); });
     const float t2 = time([&] { CK(apa::pass2(Q, K, V, O, p, w, eps, 0)); });
-    std::printf("apa eps %8.0e: cos %.6f min %.6f  hot %5.1f %% p2cta %5.1f %%  attn %.3f ms (pass2 %.3f) %.1f TOPS"
+    std::printf("apa eps %8.0e: cos %.6f min %.6f  hot %5.1f %% p2load %5.1f %%  attn %.3f ms (pass2 %.3f) %.1f TOPS"
                 "  (prep %.3f ms)\n",
                 eps, c, cmin, 100 * hot / act, 100 * chot / cact, ta, t2, flops / ta * 1e-9, tprep);
     // APA_DIAG=1: worst sampled row (min cos): norms, V cancellation, tile mass split by the warp's hot mask.

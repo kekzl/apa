@@ -6,7 +6,7 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 | Step | What |
 |---|---|
 | Pass 1 | all-FP4 flash attention (`mma.sync kind::mxf4nvf4`) over all 64-key tiles; a tile whose share of the running row sum exceeds `eps` is hot: no P·V here, bit in a per-warp mask |
-| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only |
+| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its 12 warps |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
 | Launch | one fused kernel: pass-1 CTAs, then persistent pass-2 workers on ticket counters and per-q-block ready flags |
 
@@ -32,7 +32,7 @@ Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24
 |---|---|
 | pooled cos | cosine of all pairs' outputs concatenated (the bench's default `cos`, there over 512 sampled pairs) |
 | mean cos / min cos | mean / minimum of the 49152 per-pair cosines |
-| hot tiles | share of active (warp, tile) pairs sent to pass 2 |
+| hot tiles | share of active (warp, tile) pairs sent to pass 2 (bench `hot`; `p2load`: tiles pass 2 loads per q block) |
 | attn ms | fused attention kernel, prep excluded; min over 5 reps of 5 launches; drifts up to 10 % between runs |
 
 APA 0.2.0 in the same run: min cos 0.634875 / 0.925502 / -0.638155 / 0.757021 / 0.927160 / -0.594803, pairs < 0:

@@ -1531,3 +1531,117 @@ full eps    5e-03: pairs 49152 pooled cos 0.999056 mean cos 0.995798 min 0.64367
 ### kv120832_lc_122880_2_p6_km98304.log
 full eps    5e-03: pairs 49152 pooled cos 0.999118 mean cos 0.996619 min 0.709508 | cos<0.99 3210 cos<0.9 104 cos<0 0 | relL2 mean 0.07415 p50 0.05242 p99 0.36454 p999 0.57266 max 0.79002
 ```
+
+## 2026-10-08 Optimization study: profile, pass-1 experiments, pass-2 tile stream (main 11a426c)
+
+lc_122880_1, eps 0.005 unless noted. ncu 13.4 (locked clocks, durations longer than bench).
+
+| Item | Value |
+|---|---|
+| fused kernel (ncu --set full) | 5.15 ms, SM 49.00 %, issue slots 32.22 %, tensor (hmma subpipe) 55.49 %, 168 regs, 1 CTA/SM, 25 % occupancy |
+| stall samples, pass-1 SASS region | wait 31.2 %, math 20.3 %, selected 14.7 % |
+| stall samples, pass-2 SASS region | barrier 39.5 %, wait 27.1 %, short_sb 10.6 % |
+| pass 1 alone (eps 1e9, ncu) | tensor pipe active 49.25 % of peak, xu 25.38 %, 2034552435 warp instructions |
+| pass 2 alone (ncu) | 2.37 ms, L2 55.63 %, tensor 40.93 %, barrier 65059 / wait 45770 samples |
+| prep kernels (ncu, cold cache) | stats_kernel 341.25 us (DRAM 87.44 %), quant_kv 383.71 us (DRAM 88.88 %), quant_q 11.65 us, finalize 6.50 us |
+| 3-input max.f32, ex2.approx.f16x2 on sm_120a | 2 FMNMX, 2 MUFU.EX2.F16: no hardware gain |
+
+Pass-1 clock64 per active warp-tile (instrumented build, eps 1e9): QK 615, softmax..hot test 985, PV 464 clk; per
+warp loop 5034867 clk, wait 324853 clk.
+
+Union share per group of k warps (`APA_UNION=1`), eps 0.005:
+
+```
+lc_122880_0 union eps    5e-03:  1:  10.3 %  2:  11.9 %  3:  12.8 %  4:  13.5 %  6:  14.4 %  12:  16.4 %
+lc_122880_1 union eps    5e-03:  1:   9.6 %  2:  13.1 %  3:  15.7 %  4:  17.9 %  6:  21.7 %  12:  29.9 %
+lc_122880_2 union eps    5e-03:  1:   6.0 %  2:   8.3 %  3:  10.0 %  4:  11.4 %  6:  13.6 %  12:  18.1 %
+lc_32768_1  union eps    5e-03:  1:  23.6 %  2:  31.1 %  3:  36.4 %  4:  40.7 %  6:  47.5 %  12:  60.0 %
+lc_122880_1 per q block: union 570, own avg 183 max 254, busiest SMSP 613
+lc_122880_2 per q block: union 345, own avg 114 max 167, busiest SMSP 397
+lc_32768_1  per q block: union 298, own avg 117 max 166, busiest SMSP 404
+```
+
+Pass-1 experiments (lc_122880_1, attn ms, eps 1e9 / 0.005; all O bitwise equal to the base):
+
+| Variant | Run 1 | Run 2 |
+|---|---|---|
+| base | 3.347 / 4.686 | 3.389 / 4.645 |
+| cand_max branch-free select | 3.441 / 4.673 | 3.441 / 4.724 |
+| vote reused, P V deferred 0 | 3.420 / 4.607 | 3.411 / 4.677 |
+| P V deferred to next tile, after QK | 3.767 / 4.872 | 3.763 / 4.844 |
+| P V deferred, 4 parts in softmax | 4.176 / 5.240 | 4.175 / 5.272 |
+| stream pass-2 build (base of the next two rows) | 3.352 / 4.474 | 3.380 / 4.473 |
+| + warps 4-7 / 8-11 delayed 300 / 600 ns at start | 3.369 / 4.492 | 3.355 / 4.473 |
+| + warps 4-7 / 8-11 delayed 600 / 1200 ns at start | 3.388 / 4.528 | 3.403 / 4.547 |
+
+Pass-2 tile stream (pass2_cta) vs 3 groups of 4 warps: bulk-copy rows rotated by r & 7 (240 bulk copies per tile):
+all-exact 22.029 vs 11.856 ms (lc_122880_0); owner-only release: eps 0.005 -1.5 to -2.6 %, all-exact +4.5 to +5.7 %.
+Kept: cp.async by the claiming warp, every warp passes every step. A/B, 3 reps each, attn ms, O bitwise equal:
+
+```
+lc_122880_0 base rep 1: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.517 ms (pass2 1.784) 678.9 TOPS 
+lc_122880_0 p2s rep 1: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.424 ms (pass2 1.792) 693.2 TOPS 
+lc_122880_0 base rep 2: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.519 ms (pass2 1.793) 678.5 TOPS 
+lc_122880_0 p2s rep 2: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.417 ms (pass2 1.797) 694.3 TOPS 
+lc_122880_0 base rep 3: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.489 ms (pass2 1.785) 683.2 TOPS 
+lc_122880_0 p2s rep 3: apa eps    5e-03: cos 0.999484 min 0.969733  hot  10.3 % p2cta  13.5 %  attn 4.477 ms (pass2 1.791) 685.0 TOPS 
+lc_122880_0 base rep 1: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.922 ms (pass2 0.911) 781.8 TOPS 
+lc_122880_0 p2s rep 1: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.887 ms (pass2 0.897) 788.9 TOPS 
+lc_122880_0 base rep 2: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.989 ms (pass2 0.908) 768.8 TOPS 
+lc_122880_0 p2s rep 2: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.884 ms (pass2 0.897) 789.6 TOPS 
+lc_122880_0 base rep 3: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.955 ms (pass2 0.900) 775.4 TOPS 
+lc_122880_0 p2s rep 3: apa eps    1e-02: cos 0.999102 min 0.968563  hot   4.6 % p2cta   6.2 %  attn 3.897 ms (pass2 0.898) 786.8 TOPS 
+lc_122880_1 base rep 1: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.677 ms (pass2 2.101) 655.7 TOPS 
+lc_122880_1 p2s rep 1: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.506 ms (pass2 2.066) 680.5 TOPS 
+lc_122880_1 base rep 2: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.631 ms (pass2 2.086) 662.3 TOPS 
+lc_122880_1 p2s rep 2: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.542 ms (pass2 2.062) 675.2 TOPS 
+lc_122880_1 base rep 3: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.628 ms (pass2 2.101) 662.6 TOPS 
+lc_122880_1 p2s rep 3: apa eps    5e-03: cos 0.999791 min 0.997192  hot   9.6 % p2cta  17.9 %  attn 4.478 ms (pass2 2.072) 684.8 TOPS 
+lc_122880_1 base rep 1: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.125 ms (pass2 1.276) 743.5 TOPS 
+lc_122880_1 p2s rep 1: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.071 ms (pass2 1.294) 753.2 TOPS 
+lc_122880_1 base rep 2: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.163 ms (pass2 1.277) 736.6 TOPS 
+lc_122880_1 p2s rep 2: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.073 ms (pass2 1.294) 753.0 TOPS 
+lc_122880_1 base rep 3: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.133 ms (pass2 1.290) 741.9 TOPS 
+lc_122880_1 p2s rep 3: apa eps    1e-02: cos 0.999620 min 0.993596  hot   5.4 % p2cta  10.7 %  attn 4.079 ms (pass2 1.293) 751.8 TOPS 
+lc_122880_2 base rep 1: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.787 ms (pass2 1.848) 640.6 TOPS 
+lc_122880_2 p2s rep 1: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.636 ms (pass2 1.713) 661.5 TOPS 
+lc_122880_2 base rep 2: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.734 ms (pass2 1.854) 647.8 TOPS 
+lc_122880_2 p2s rep 2: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.631 ms (pass2 1.705) 662.1 TOPS 
+lc_122880_2 base rep 3: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.713 ms (pass2 1.864) 650.7 TOPS 
+lc_122880_2 p2s rep 3: apa eps    5e-03: cos 0.999400 min 0.944326  hot   6.0 % p2cta  11.4 %  attn 4.633 ms (pass2 1.706) 661.9 TOPS 
+lc_122880_2 base rep 1: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.184 ms (pass2 1.191) 732.9 TOPS 
+lc_122880_2 p2s rep 1: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.168 ms (pass2 1.169) 735.8 TOPS 
+lc_122880_2 base rep 2: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.216 ms (pass2 1.196) 727.3 TOPS 
+lc_122880_2 p2s rep 2: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.166 ms (pass2 1.171) 736.1 TOPS 
+lc_122880_2 base rep 3: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.250 ms (pass2 1.190) 721.6 TOPS 
+lc_122880_2 p2s rep 3: apa eps    1e-02: cos 0.998788 min 0.944326  hot   3.2 % p2cta   6.6 %  attn 4.167 ms (pass2 1.169) 735.8 TOPS 
+lc_32768_1 base rep 1: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.867 ms (pass2 1.245) 428.0 TOPS 
+lc_32768_1 p2s rep 1: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.828 ms (pass2 1.230) 437.0 TOPS 
+lc_32768_1 base rep 2: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.867 ms (pass2 1.254) 427.9 TOPS 
+lc_32768_1 p2s rep 2: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.821 ms (pass2 1.245) 438.6 TOPS 
+lc_32768_1 base rep 3: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.876 ms (pass2 1.254) 425.9 TOPS 
+lc_32768_1 p2s rep 3: apa eps    5e-03: cos 0.999906 min 0.996628  hot  23.6 % p2cta  40.7 %  attn 1.822 ms (pass2 1.243) 438.5 TOPS 
+lc_32768_1 base rep 1: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.497 ms (pass2 0.798) 533.7 TOPS 
+lc_32768_1 p2s rep 1: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.449 ms (pass2 0.802) 551.4 TOPS 
+lc_32768_1 base rep 2: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.500 ms (pass2 0.805) 532.5 TOPS 
+lc_32768_1 p2s rep 2: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.455 ms (pass2 0.804) 549.1 TOPS 
+lc_32768_1 base rep 3: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.498 ms (pass2 0.800) 533.4 TOPS 
+lc_32768_1 p2s rep 3: apa eps    1e-02: cos 0.999782 min 0.993970  hot  13.2 % p2cta  24.8 %  attn 1.453 ms (pass2 0.804) 549.9 TOPS 
+lc_122880_0 eps 0.005: O bitwise equal
+lc_122880_0 eps 0.01: O bitwise equal
+lc_122880_1 eps 0.005: O bitwise equal
+lc_122880_1 eps 0.01: O bitwise equal
+lc_122880_2 eps 0.005: O bitwise equal
+lc_122880_2 eps 0.01: O bitwise equal
+lc_32768_1 eps 0.005: O bitwise equal
+lc_32768_1 eps 0.01: O bitwise equal
+```
+
+Paged (bs 16), chunked (60 x 2048, tile cache), determinism, lc_122880_2, both builds:
+
+```
+determinism: 0 of 25165824 output elements differ over 4 reruns
+paged bs 16 eps 5e-03: flat prep+attn  cos 0.999400 min 0.944326 | paged  cos 0.999400 min 0.944326
+chunks 60 x 2048 eps 5e-03: full requant  cos 0.999400 min 0.944326 | incremental  cos 0.999394 min 0.938871
+stale-cache redo vs fresh prefill: cos 1.000000
+```

@@ -13,6 +13,10 @@
   < 0.99: 1452 -> 29; 178.32 -> 182.88 ms (full requantization 196.59 ms).
 - Bench: `APA_CHUNKS=2` compares every chunk with a full requantization; diagnostics `-DAPA_DBG_KMEAN_LEN`,
   `-DAPA_DBG_KMEAN_FROM`.
+- Pass 2: one stream of the union of a q block's hot tiles through 3 K/V smem stages, shared by its 12 warps (was 3
+  independent 4-warp groups with bar.sync per tile). Outputs bitwise equal; attention at eps 0.005 / 0.01, mean of 3:
+  -1.5 / -1.7 % (lc_122880_0), -2.9 / -1.6 % (lc_122880_1), -2.4 / -1.2 % (lc_122880_2), -2.5 / -3.1 % (lc_32768_1);
+  all-exact +2.9 to +3.5 %. Bench: `p2load` (12-warp union) replaces `p2cta`; `APA_UNION=1`, `APA_OUT=file`.
 
 ## 0.3.0 (2026-10-08)
 

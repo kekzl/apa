@@ -123,6 +123,15 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
       "r"(parity)
       : "memory");
 }
+__device__ __forceinline__ bool mbar_test(uint32_t bar, uint32_t parity) {  // non-blocking: phase parity done
+  uint32_t ok;
+  asm volatile(
+      "{\n .reg .pred p;\n mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\n selp.u32 %0, 1, 0, p;\n}"
+      : "=r"(ok)
+      : "r"(bar), "r"(parity)
+      : "memory");
+  return ok != 0u;
+}
 // shared::cta destination: the shared::cluster form compiles on sm_120a to a driver syscall
 // (__cuda_syscall_cp_async_bulk_unicast) that raises the stack limit to 14448 B/thread, about 3.5 GB local memory.
 __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {

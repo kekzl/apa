@@ -212,9 +212,12 @@ tiles exports $(m,\ell_{\text{cold}})$ and the unnormalized cold partial $o$ in 
 
 \subsection{Pass 2: exact FP16 over hot tiles}
 
-A pass-2 group of 4 warps takes the same packed rows as 4 consecutive pass-1 warps. It streams the union of
-their hot tiles from the original FP16 K and V (flat or paged), double-buffered with \code{cp.async}: $K_{t+1}$
-loads under $PV_t$, $V_{t+1}$ under $QK_{t+1}$. Each warp computes only its own hot tiles with
+A pass-2 CTA takes the 192 packed rows of one pass-1 query block with the same 12 warps. The union of their
+hot tiles streams from the original FP16 K and V (flat or paged) through a ring of 3 shared-memory stages of
+one K and one V tile: any warp that finds the next stage released by all warps claims it (atomic CAS) and
+fills it with \code{cp.async}, completion signalled on an mbarrier. Every warp passes every union step, so
+the 12 warps share each load; against three independent 4-warp groups (0.3.0) this cuts attention time by
+1.2 to 3.1\,\% at $\eps=0.005$ and 0.01 on four dumps, with bitwise equal outputs. Each warp computes only its own hot tiles with
 \code{mma.sync.m16n8k16} (f16 inputs, f16 accumulation, the default of imp's FlashAttention-2 path) and an
 FP32 online softmax in the $\log_2$ domain. At the end each row is merged with its pass-1 partial by
 Eq.~\eqref{eq:merge} and written to $O$.
@@ -228,8 +231,8 @@ it to an FP32 accumulator; the extra 32 registers per thread cause spills in the
 
 Both passes run in one launch of $n_1+n_{\text{SM}}$ CTAs of 384 threads, where $n_1$ is the number of
 (batch, KV head, query block) pass-1 items. Each CTA takes a ticket from an atomic counter. Tickets below
-$n_1$ run pass 1 (causal: heaviest query blocks first); the rest become persistent pass-2 workers whose
-three 4-warp groups pull (query block, sub-group) items from a second counter. A pass-2 group spins on its
+$n_1$ run pass 1 (causal: heaviest query blocks first); the rest become persistent pass-2 workers that
+pull query blocks from a second counter. A pass-2 worker spins on its
 query block's ready flag, which the pass-1 CTA sets with a release store after a fence; the worker reads it
 with acquire semantics. Tickets are handed to CTAs in the order they start running, so every pass-1 item a
 worker waits on is already resident: the scheme cannot deadlock. Pass-2 work fills the SMs left idle by
