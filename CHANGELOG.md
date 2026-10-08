@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-08)
 
 - Bench: `APA_FULL=1` also scores the `APA_PAGED` and `APA_CHUNKS` outputs over all pairs (`  full <path>` lines).
 - Paper tables eps / context length on all 49152 pairs (AUDIT.md, Phase 3). lc_122880_2 min cos at eps 0.001 /
