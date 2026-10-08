@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use APA, please cite it as below."
+title: "APA: adaptive-precision attention"
+authors:
+  - family-names: Friedmann
+    given-names: Raphael
+    alias: kekzl
+repository-code: "https://github.com/kekzl/apa"
+license: MPL-2.0
+type: software
+date-released: "2026-10-08"

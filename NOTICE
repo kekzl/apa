@@ -1,0 +1,10 @@
+APA: adaptive-precision attention
+Copyright (c) 2026 Raphael Friedmann (github.com/kekzl)
+https://github.com/kekzl/apa
+
+Licensed under the Mozilla Public License, v. 2.0 (LICENSE). Every source file carries the MPL-2.0 header;
+keep it in copies and modified versions (MPL-2.0 section 3.4).
+
+Software or documentation that includes or builds on APA is asked to credit it as:
+
+  APA: adaptive-precision attention, Raphael Friedmann, https://github.com/kekzl/apa
