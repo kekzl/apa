@@ -112,6 +112,7 @@ int main(int argc, char** argv) {
   std::vector<float> hr((size_t)ns * hd);
   CK(cudaMemcpy(hr.data(), ref, hr.size() * 4, cudaMemcpyDeviceToHost));
   int worst = 0;  // sample index of the last cmin (APA_DIAG)
+  std::vector<float> rall;  // APA_FULL: FP32 reference of every (row, head) pair
   auto accuracy = [&](double& cmin) {
     std::vector<T> ho(nq);
     CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
@@ -158,7 +159,10 @@ int main(int argc, char** argv) {
   const size_t wsb = apa::workspace_bytes(p);
   void* ws;
   CK(cudaMalloc(&ws, wsb));
-  const apa::Workspace w = apa::carve(p, ws);
+  apa::Workspace w = apa::carve(p, ws);
+#ifdef APA_DBG
+  CK(cudaMalloc(&w.dbg, (size_t)n * nh * sizeof(float4)));  // [nkv][R] rows, R = n * G
+#endif
   const float tprep = time([&] { CK(apa::prep(Q, akv, p, w, 0)); });
   std::vector<float> epss{-1.f, 1e-3f, 3e-3f, 1e-2f};
   if (const char* e = std::getenv("APA_EPS")) epss = {(float)std::atof(e)};  // one eps (profiling)
@@ -243,6 +247,148 @@ int main(int argc, char** argv) {
                   "hot %d tiles mass %.3f |hot pv| %.4f |cold pv| %.4f, tiles > 0.005: %d (cold mass %.3f)\n",
                   s, h, cm, std::sqrt(rn), std::sqrt(on), std::sqrt(dn / rn), std::sqrt(rn) / pvn, mtop, nhot,
                   mhot, std::sqrt(hn), std::sqrt(cn), nbig, mcold_big);
+    }
+    // APA_FULL=1: every (row, head) pair vs the FP32 ref_kernel (batches of 1024, cached in APA_REF_CACHE):
+    // cos and relative L2 histogram, top-20 pairs with warp state (pass-1 export in -DAPA_DBG builds), FP32 tile
+    // masses, Q / K channel amax spread of the pair's heads.
+    if (std::getenv("APA_FULL")) {
+      const size_t np = (size_t)n * nh;
+      if (rall.empty()) {
+        rall.resize(np * hd);
+        const char* cache = std::getenv("APA_REF_CACHE");
+        FILE* g = cache ? std::fopen(cache, "rb") : nullptr;
+        const bool hit = g && std::fread(rall.data(), 4, rall.size(), g) == rall.size();
+        if (g) std::fclose(g);
+        if (!hit) {
+          const int nb = 1024;
+          std::vector<int2> pr(nb);
+          int2* dpr;
+          float *dscr, *dout;
+          CK(cudaMalloc(&dpr, nb * sizeof(int2)));
+          CK(cudaMalloc(&dscr, (size_t)nb * kv * 4));
+          CK(cudaMalloc(&dout, (size_t)nb * hd * 4));
+          for (size_t i0 = 0; i0 < np; i0 += nb) {
+            const int c = (int)std::min<size_t>(nb, np - i0);
+            for (int i = 0; i < c; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
+            CK(cudaMemcpy(dpr, pr.data(), c * sizeof(int2), cudaMemcpyHostToDevice));
+            ref_kernel<<<c, 256>>>(Q, K, V, n, kv, nh, nkv, off, scale, dpr, dscr, dout);
+            CK(cudaMemcpy(rall.data() + i0 * hd, dout, (size_t)c * hd * 4, cudaMemcpyDeviceToHost));
+          }
+          CK(cudaFree(dpr));
+          CK(cudaFree(dscr));
+          CK(cudaFree(dout));
+          if (cache && (g = std::fopen(cache, "wb"))) {
+            std::fwrite(rall.data(), 4, rall.size(), g);
+            std::fclose(g);
+          }
+        }
+      }
+#ifdef APA_DBG
+      CK(cudaMemset(w.dbg, 0, (size_t)nkv * R * sizeof(float4)));
+#endif
+      CK(apa::attn(Q, K, V, O, p, w, eps, 0));
+      CK(cudaDeviceSynchronize());
+      std::vector<T> ho(nq);
+      CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+      std::vector<std::pair<double, size_t>> cs(np);
+      std::vector<double> rel(np);
+      double dot = 0, na = 0, nb2 = 0, csum = 0;
+      const double edges[] = {0.0, 0.5, 0.9, 0.99, 0.999, 0.9999};
+      size_t hist[7] = {0, 0, 0, 0, 0, 0, 0};
+      for (size_t i = 0; i < np; ++i) {
+        double d = 0, x = 0, y = 0, e2 = 0;
+        for (int e = 0; e < hd; ++e) {
+          const double a = rall[i * hd + e], b = __half2float(ho[i * hd + e]);
+          d += a * b, x += a * a, y += b * b, e2 += (a - b) * (a - b);
+        }
+        const double c = d / std::sqrt(x * y);
+        cs[i] = {c, i};
+        rel[i] = std::sqrt(e2 / x);
+        dot += d, na += x, nb2 += y, csum += c;
+        int k = 0;
+        while (k < 6 && c >= edges[k]) ++k;
+        ++hist[k];
+      }
+      std::vector<double> rs = rel;
+      std::sort(rs.begin(), rs.end());
+      double rsum = 0;
+      for (double v : rel) rsum += v;
+      std::partial_sort(cs.begin(), cs.begin() + 20, cs.end());
+      std::printf("full eps %8.0e: pairs %zu pooled cos %.6f mean cos %.6f min %.6f | cos<0.99 %zu cos<0.9 %zu cos<0 %zu |"
+                  " relL2 mean %.5f p50 %.5f p99 %.5f p999 %.5f max %.5f\n",
+                  eps, np, dot / std::sqrt(na * nb2), csum / np, cs[0].first, hist[0] + hist[1] + hist[2] + hist[3],
+                  hist[0] + hist[1] + hist[2], hist[0], rsum / np, rs[np / 2], rs[np * 99 / 100], rs[np * 999 / 1000],
+                  rs[np - 1]);
+      std::printf("  hist cos: <0 %zu [0,.5) %zu [.5,.9) %zu [.9,.99) %zu [.99,.999) %zu [.999,.9999) %zu >=.9999 %zu\n",
+                  hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6]);
+      // per-channel amax spread (max / median over 128 channels) of K per kv head and Q per q head
+      auto spread = [&](const std::vector<T>& src, size_t rowsN, int heads, int hsel) {
+        std::vector<float> am(hd, 0.f);
+        for (size_t r2 = 0; r2 < rowsN; ++r2)
+          for (int e = 0; e < hd; ++e)
+            am[e] = std::max(am[e], std::fabs(__half2float(src[(r2 * heads + hsel) * hd + e])));
+        std::vector<float> s2 = am;
+        std::sort(s2.begin(), s2.end());
+        return s2[hd - 1] / std::max(s2[hd / 2], 1e-6f);
+      };
+      std::vector<int2> top(20);
+      for (int i = 0; i < 20; ++i) top[i] = make_int2((int)(cs[i].second / nh), (int)(cs[i].second % nh));
+      int2* dtop;
+      float *dscr, *dout;
+      CK(cudaMalloc(&dtop, 20 * sizeof(int2)));
+      CK(cudaMalloc(&dscr, (size_t)20 * kv * 4));
+      CK(cudaMalloc(&dout, 20 * hd * 4));
+      CK(cudaMemcpy(dtop, top.data(), 20 * sizeof(int2), cudaMemcpyHostToDevice));
+      ref_kernel<<<20, 256>>>(Q, K, V, n, kv, nh, nkv, off, scale, dtop, dscr, dout);
+      std::vector<float> sc20((size_t)20 * kv);
+      CK(cudaMemcpy(sc20.data(), dscr, sc20.size() * 4, cudaMemcpyDeviceToHost));
+#ifdef APA_DBG
+      std::vector<float4> hdbg((size_t)nkv * R);
+      CK(cudaMemcpy(hdbg.data(), w.dbg, hdbg.size() * sizeof(float4), cudaMemcpyDeviceToHost));
+#endif
+      for (int i = 0; i < 20; ++i) {
+        const int s = top[i].x, h = top[i].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
+        const int r = s * G + h % G, qb = r / 192, wi = (hkv * w.nqb + qb) * 12 + (r % 192) / 16;
+        const float* sc = sc20.data() + (size_t)i * kv;
+        double l = 0;
+        for (int j = 0; j < nrow; ++j) l += sc[j];
+        std::vector<double> tm;
+        double mcold = 0, tmax = 0, cmax = 0, cpv2 = 0;
+        int nhot = 0, ncbig = 0;
+        std::vector<double> cpv(hd, 0.0);
+        for (int t = 0; t * 64 < nrow; ++t) {
+          const bool ht = ((hm[wi * w.W + t / 32] >> (t % 32)) & 1u);
+          double mt = 0;
+          for (int j = t * 64; j < std::min(nrow, t * 64 + 64); ++j) {
+            mt += sc[j] / l;
+            if (!ht)
+              for (int e = 0; e < hd; ++e) cpv[e] += sc[j] / l * __half2float(hv[((size_t)j * nkv + hkv) * hd + e]);
+          }
+          tm.push_back(mt);
+          tmax = std::max(tmax, mt);
+          nhot += ht;
+          if (!ht) mcold += mt, cmax = std::max(cmax, mt), ncbig += mt > eps;
+        }
+        std::sort(tm.rbegin(), tm.rend());
+        int n90 = 0;
+        for (double acc = 0; n90 < (int)tm.size() && acc < 0.9; ++n90) acc += tm[n90];
+        double rn = 0;
+        for (int e = 0; e < hd; ++e) rn += (double)rall[cs[i].second * hd + e] * rall[cs[i].second * hd + e], cpv2 += cpv[e] * cpv[e];
+        std::printf("  top %2d s %4d h %2d qb %2d warp %d cos %.6f relL2 %.4f | hot %4d/%4zu %s | fp32: cold mass %.4f max "
+                    "tile %.4f max cold tile %.4f cold tiles > eps %d n90 %d |cold pv|/|ref| %.3f | spread K %.1f Q %.1f",
+                    i, s, h, qb, wi, cs[i].first, rel[cs[i].second], nhot, tm.size(), nhot ? "merge" : "cold-only",
+                    mcold, tmax, cmax, ncbig, n90, std::sqrt(cpv2 / rn), spread(hk, kv, nkv, hkv),
+                    spread(hq, n, nh, h));
+#ifdef APA_DBG
+        const float4 dg = hdbg[(size_t)hkv * R + r];
+        std::printf(" | fp4: m %.2f lambda %.4g l_cold %.4g cold share %.4f max tile %.4f", dg.x, dg.y, dg.z,
+                    dg.y > 0.f ? dg.z / dg.y : 0.f, dg.w);
+#endif
+        std::printf("\n");
+      }
+      CK(cudaFree(dtop));
+      CK(cudaFree(dscr));
+      CK(cudaFree(dout));
     }
   }
   // APA_DET=1: prep + attention 5x at the last eps, outputs compared bitwise with the first run.

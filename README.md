@@ -78,6 +78,8 @@ exactly, the eps 0.002 / 0.01 rows are 0.1.0):
 | Chunked prefill + tile cache | `APA_CHUNKS=1` |
 | Determinism (5 reruns, bitwise) | `APA_DET=1` |
 | Worst sampled row: norms, V cancellation, hot/cold mass | `APA_DIAG=1` |
+| Every (row, head) pair vs FP32: histogram, relL2, top-20 | `APA_FULL=1` (`APA_REF_CACHE=file` caches the reference) |
+| Pass-1 row export (m, lambda, l_cold) in `APA_FULL` top-20 | `NVFLAGS=-DAPA_DBG sh bench/build.sh` |
 | Pass-2 O in fp32 across tiles (exactness studies) | `NVFLAGS=-DAPA_P2_F32O=1 sh bench/build.sh` |
 | APA 0.2.0 cold frame (A/B) | `NVFLAGS=-DAPA_HOT_DROP=0 sh bench/build.sh` |
 

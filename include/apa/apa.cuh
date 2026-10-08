@@ -58,6 +58,9 @@ struct Workspace {
   int kvcap;                     // KV / hs / ksum from a KvState of this many tiles (0: own, ntkv)
   float* kpart;                  // [bhk][nchunk][D] K column sums per stats chunk (deterministic mean)
   int nchunk;
+#ifdef APA_DBG
+  float4* dbg = nullptr;  // [rows] pass-1 row state (bench APA_FULL); nullptr: not written
+#endif
   size_t bytes;
 };
 inline size_t tile_bytes(int D) { return D == 64 ? Cfg<64>::TILE : D == 128 ? Cfg<128>::TILE : Cfg<256>::TILE; }
@@ -191,7 +194,11 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
   }
   if (e == cudaSuccess) e = cudaMemsetAsync(w.ticket, 0, 8, st);
   if (e != cudaSuccess) return e;
+#ifdef APA_DBG
+  const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.dbg};
+#else
   const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum};
+#endif
   // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
   static int nsm = 0, attr_dev = -1;
   int dev = 0;

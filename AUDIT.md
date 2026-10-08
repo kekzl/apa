@@ -58,3 +58,84 @@ Contradiction: line 6 is wrong. Default `APA_P2_F32O=0` keeps O in half2 across 
 - 0.3.0 (6801a50) already changes pass 1 (`APA_HOT_DROP`, cold frame) after a single-row diagnosis
   (`APA_DIAG=1`, worst of 512 samples). Phase 1 re-checks the cause on all pairs with the A/B switch
   `-DAPA_HOT_DROP=0` (= 0.2.0 pass 1) and keeps or revises the fix based on that.
+
+## Phase 1: worst rows, full mode
+
+### Tooling
+
+| Item | Where |
+|---|---|
+| `APA_FULL=1` | bench: all 49152 pairs vs unchanged `ref_kernel` (batches of 1024, `APA_REF_CACHE`); pooled cos, mean of per-pair cos, min, counts < 0.99 / 0.9 / 0, relL2 mean / p50 / p99 / p999 / max, cos histogram, top-20 pairs |
+| Top-20 columns | warp, q block, hot tiles of the warp, merge vs cold-only; FP32: cold mass, max tile, max cold tile, cold tiles with FP32 share > eps, n90, cold-part norm / ref norm; K / Q channel amax spread of the pair's heads |
+| `-DAPA_DBG` | pass-1 export per row: m, lambda, l_cold (ml units), max tile share at test time; default build unchanged |
+| Builds | PERF_LOG "Phase 1 full mode"; all with the shared::cta fix (d6aecf3) |
+
+DBG column "fp4 max tile" is 1.0000 in every row: the first visited tile (sink) is tested against lambda = 0.
+The column carries no information; hypothesis (c) is judged from the FP32 columns instead.
+
+### Sample vs all pairs (eps 0.005, same run, PERF_LOG `ab_*`)
+
+| Dump | 0.2.0 sampled min | 0.2.0 all-pairs min | pairs < 0 | < 0.9 | 0.3.0 sampled min | 0.3.0 all-pairs min | < 0 | < 0.9 |
+|---|---|---|---|---|---|---|---|---|
+| lc_122880_0 | 0.898838 | 0.634875 | 0 | 319 | 0.969733 | 0.959676 | 0 | 0 |
+| lc_122880_1 | 0.970893 | 0.925502 | 0 | 0 | 0.997192 | 0.975775 | 0 | 0 |
+| lc_122880_2 | -0.444615 | -0.638155 | 789 | 5460 | 0.944326 | 0.841302 | 0 | 14 |
+| lc_32768_0 | 0.879942 | 0.757021 | 0 | 50 | 0.967587 | 0.927517 | 0 | 0 |
+| lc_32768_1 | 0.984021 | 0.927160 | 0 | 0 | 0.996628 | 0.980919 | 0 | 0 |
+| lc_32768_2 | 0.100775 | -0.594803 | 110 | 5655 | 0.987198 | 0.969776 | 0 | 0 |
+
+The 512-pair sample overstates the minimum on every dump. Mean of per-pair cos, 0.2.0 -> 0.3.0:
+0.995494 -> 0.998512, 0.999064 -> 0.999717, 0.931721 -> 0.998438, 0.997637 -> 0.999037, 0.999340 -> 0.999827,
+0.955446 -> 0.999372. Attn ms 0.2.0 / 0.3.0 same run: 4.555 / 4.490, 4.676 / 4.759, 4.758 / 4.840, 2.245 / 2.285,
+1.881 / 1.889, 1.856 / 1.863. Release (rel*) and DBG (d*) builds give identical accuracy lines.
+
+### Diagnostic runs, lc_122880_2, all pairs, eps 0.005 unless noted
+
+| Run | mean cos | min | < 0.9 | < 0 |
+|---|---|---|---|---|
+| 0.2.0 default | 0.931721 | -0.638155 | 5460 | 789 |
+| 0.2.0 `-DAPA_EXACT_MAX` | 0.991244 | 0.251078 | 960 | 0 |
+| 0.2.0 `APA_ORDER=0` | 0.934156 | -0.638155 | 5115 | 787 |
+| pure FP4, eps 1e9 (0.2.0 = 0.3.0, no hot tile) | 0.868772 | -0.346474 | 16899 | 25 |
+| all exact, eps < 0 (0.2.0 = 0.3.0, pass 1 skipped) | 0.993600 | 0.834726 | 465 | 0 |
+| 0.3.0 default | 0.998438 | 0.841302 | 14 | 0 |
+| 0.3.0 `-DAPA_EXACT_MAX` | 0.998437 | 0.846343 | 14 | 0 |
+| 0.3.0 `APA_ORDER=0` | 0.998575 | 0.842157 | 14 | 0 |
+
+0.2.0 at eps 0.005 has 789 pairs < 0, pure FP4 has 25: adding exact hot tiles made those rows worse. All 20
+worst pairs of every 0.005 log are on the merge path (warp with hot tiles); none is cold-only.
+
+### Hypotheses
+
+| | Hypothesis | Verdict | Evidence |
+|---|---|---|---|
+| (a) | diffuse rows, accumulated FP4 error over ~1900 cold tiles | residual cause in 0.3.0, not the 0.2.0 failure | worst 0.3.0 pairs: max cold tile 0.0009 to 0.0016, FP32 cold mass 0.0548 to 0.0903, cold-part norm / ref norm 1.859 to 2.330 (hot and cold parts cancel); FP4 error of the tail is amplified ~2x |
+| (b) | E2M1 truncation, systematic mass loss | confirmed (0.2.0) | lc_122880_2 0.2.0 top 8: FP32 cold mass 0.0962 to 0.1511, FP4 cold share l_cold / lambda 0.0069 to 0.0254, m 21.94 to 22.68 (sink frame); 0.3.0 same rows' class: FP4 0.0462 to 0.0977 vs FP32 0.0548 to 0.0903, m 9.12 to 12.78 |
+| (c) | hot test on FP4 scores misses a hot tile | occurs, not the cause | lc_122880_0 / _2 top-20: 0 cold tiles with FP32 share > eps; lc_122880_1 0.3.0: 7 of 20 pairs, up to 8 tiles, max 0.0118; those pairs cos >= 0.975775 |
+| (d) | merge / normalisation, l_cold ~ 0, -6 clamp | clamp confirmed as the mechanism of (b); merge correct | `-DAPA_EXACT_MAX` (TAU 4 -> 0) moves the unclamped range of a group from 2^-10 to 2^-14 below m and turns 789 pairs < 0 into 0 (min 0.251078); l_cold 0.007 to 0.026 (not 0, no fp32 underflow) |
+| (e) | Q / K outlier channels vs global head scale | rejected | channel amax spread (max / median) all heads, lc_122880_2: K 2.0 to 4.4, Q 2.9 to 10.8; worst heads 18 to 20 (kv head 6): K 3.2, Q 3.7 to 4.1; heads with Q spread 10.8 / 9.0 / 8.8 not among the worst |
+
+Cause: in 0.2.0 the pass-1 frame m followed every tile, so the hot sink (FP32 max tile share 0.8365 to 0.8970, top 8) set m. The
+P scale exponent of a 16-key group is clamped at -6; a group more than 2^-10 below m quantizes to E2M1 zero.
+The tail (FP32 cold mass ~0.10, max cold tile <= 0.0025) vanished from the cold partial, while its output
+component exceeds the reference norm (cancellation), so the merged row lost its direction.
+
+Fix: 0.3.0 cold frame (`APA_HOT_DROP` 32, commit 6801a50, made before this audit from a single sampled row);
+the all-pairs runs above confirm it. Tile order and exact max are not fixes: `APA_ORDER=0` leaves 787 pairs < 0
+in 0.2.0 and costs hot share 11.0 vs 6.0 % (attn 6.207 vs 4.995 ms, lc_122880_2, d32 builds) in 0.3.0.
+
+Guarantee (precise): a hot tile no longer moves the cold frame above (its max - 32) in log2. A cold 16-key
+group is quantized without the -6 clamp if its max is at most 10 (TAU 4) below the cold frame. So a hot tile can
+push a cold group to E2M1 zero only if that group lies more than 2^-42 below the hot tile's max. Nothing bounds
+the FP4 error of the remaining cold mass; the hot test bounds the FP4-estimated share of each cold tile only.
+
+### Claims to correct (later phase)
+
+| Claim | Where | Correction |
+|---|---|---|
+| "worst-case cosine ... from -0.444615 to 0.944326" | paper abstract, 4.2, CHANGELOG 0.3.0, README | sample minima; all pairs: -0.638155 -> 0.841302 (lc_122880_2) |
+| cos min columns | README table, paper Tables 3 / 4 / 5 | label as 512-pair sample or replace with all-pairs values |
+| "cos mean" | README, paper | pooled cosine; say so or add mean of per-pair cos |
+| 2.50x / 2.32x | paper, README 0.2.0 text | attention only, prep excluded; with prep 2.196 / 2.006 |
+| apa_pass2.cuh:6 "f16 x f16 -> f32" | code comment | fixed in phase 1: "f16 accumulate" |
+| Proposition | paper 3.2 | holds for FP4 estimates of l_t and lambda |

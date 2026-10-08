@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
 // CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
-// its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f32), online softmax in fp32 (log2 domain).
+// its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f16 accumulate), online softmax in fp32 (log2 domain).
 #pragma once
 #include <type_traits>
 
@@ -322,7 +322,6 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs
   float sh_lo, sh_hi;
   row_shift(qa, p1.ksum + (size_t)bhk * 128, qmul, T0, sh_lo, sh_hi);
   Rows2 w;
-#pragma unroll
   w.o.zero();
   w.m_lo = w.m_hi = -INFINITY;
   w.l_lo = w.l_hi = 0.f;

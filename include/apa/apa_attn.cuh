@@ -18,6 +18,9 @@ struct Pass1Out {
   float* part;        // [rows][D]: sum over cold tiles of p * v, p relative to m
   float2* ml;         // [rows]: (m, sum over cold tiles of p), log2 domain
   const float* ksum;  // [bhk][D] K column mean (finalized): pass 1 scores are q.(k - kmean), pass 2 must match
+#ifdef APA_DBG
+  float4* dbg;  // [rows]: (m, lambda, l_cold, max tile share at test time), lambda / l_cold in ml units
+#endif
 };
 
 // Lazy row max: m may lag the true row max by up to TAU (-DAPA_EXACT_MAX: exact).
@@ -37,6 +40,9 @@ struct Rows {
   float ol[4];               // P.1 over cold tiles (row sums via a ones tile)
   float m_lo, m_hi;          // running max, log2 domain
   float la_lo, la_hi;        // running row sum over ALL tiles (hot ones too)
+#ifdef APA_DBG
+  float ms_lo, ms_hi;  // max tile share l_t / (lambda + l_t) at test time
+#endif
 };
 
 template <int D>
@@ -238,6 +244,10 @@ __device__ __forceinline__ bool tile_step(Rows<Cfg<D>::DT>& w, const WarpQ<D>& q
   float tl[4] = {0.f, 0.f, 0.f, 0.f};  // tile row sums from P.1 (frame c): every lane holds its rows' sums
   mma_fp4(tl, pa, ONES, ONES, psf, SF_ONE);
   const float a_lo = (c_lo == w.m_lo) ? 1.f : ex2(w.m_lo - c_lo), a_hi = (c_hi == w.m_hi) ? 1.f : ex2(w.m_hi - c_hi);
+#ifdef APA_DBG
+  w.ms_lo = fmaxf(w.ms_lo, tl[0] / (w.la_lo * a_lo + tl[0]));  // 0/0 (masked row) is NaN: fmaxf keeps ms
+  w.ms_hi = fmaxf(w.ms_hi, tl[2] / (w.la_hi * a_hi + tl[2]));
+#endif
   if (__any_sync(~0u, tl[0] > eps * (w.la_lo * a_lo + tl[0]) || tl[2] > eps * (w.la_hi * a_hi + tl[2]))) {
     const float f_lo = fmaxf(w.m_lo, c_lo - HOT_DROP), f_hi = fmaxf(w.m_hi, c_hi - HOT_DROP);
     const float b_lo = (f_lo == c_lo) ? 1.f : ex2(c_lo - f_lo), b_hi = (f_hi == c_hi) ? 1.f : ex2(c_hi - f_hi);
@@ -264,6 +274,13 @@ __device__ __forceinline__ void p1_epilogue(const Rows<Cfg<D>::DT>& w, bool any_
   const int R = dm.R, G = dm.G, r_hi = r_lo + 8;
   const bool ok_lo = r_lo < R, ok_hi = r_hi < R;
   const size_t qb_row = (size_t)(b * dm.Hkv + hk) * R;
+#ifdef APA_DBG
+  if (T0 == 0 && out.dbg != nullptr) {
+    constexpr float u = (TAU > 0.f ? 16.f : 1.f) / 1536.f;
+    if (ok_lo) out.dbg[qb_row + r_lo] = make_float4(w.m_lo, w.la_lo * u, w.ol[0] * u, w.ms_lo);
+    if (ok_hi) out.dbg[qb_row + r_hi] = make_float4(w.m_hi, w.la_hi * u, w.ol[2] * u, w.ms_hi);
+  }
+#endif
   if (any_hot) {
     constexpr float kUnscale = (TAU > 0.f ? 16.f : 1.f) / 1536.f;
     const float f = scv * kUnscale;
@@ -374,6 +391,9 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
   w.ol[0] = w.ol[1] = w.ol[2] = w.ol[3] = 0.f;
   w.m_lo = w.m_hi = -INFINITY;
   w.la_lo = w.la_hi = 0.f;
+#ifdef APA_DBG
+  w.ms_lo = w.ms_hi = 0.f;
+#endif
   bool any_hot = false;  // warp-uniform
   uint32_t* whot = out.warp_hot + ((size_t)(bhk * nqb + qb) * NW + warp) * out.W;
 
