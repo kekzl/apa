@@ -180,8 +180,7 @@ template <bool CAUSAL, typename T, typename RS>
 inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p, const Workspace& w, float eps,
                                bool with_pass1, cudaStream_t st) {
   constexpr int NW = Launch<128>::NW;
-  constexpr int p2 = P2_GROUPS * P2_GSMEM;
-  constexpr int smem = Launch<128>::ST * Cfg<128>::TILE > p2 ? Launch<128>::ST * Cfg<128>::TILE : p2;
+  constexpr int smem = Launch<128>::ST * Cfg<128>::TILE > 3 * P2_SMEM ? Launch<128>::ST * Cfg<128>::TILE : 3 * P2_SMEM;
   Dims dm = make_dims(p);
   if (w.kvcap > 0) dm.kvcap = w.kvcap;
   const size_t bhk = (size_t)p.B * p.Hkv, masks = bhk * w.nqb * (NW * w.W + 1) * 4;  // warp_hot + ready
