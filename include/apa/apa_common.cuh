@@ -71,10 +71,11 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
 }
 
 // 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale).
-__device__ __forceinline__ uint8_t quant16(const float* x, uint2& w) {
+__device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_out = nullptr) {
   float am = 0.f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) am = fmaxf(am, fabsf(x[i]));
+  if (am_out != nullptr) *am_out = am;
   const uint8_t sb = e4m3_enc(am / 6.f);
   const float inv = 1.f / fmaxf(e4m3_dec(sb), 1.f / 512);
   float q[16];

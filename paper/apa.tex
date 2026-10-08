@@ -101,7 +101,12 @@ of 12 warps covers $12\cdot16=192$ packed rows and loads each KV tile once for a
 
 \subsection{Preparation}
 
-A prep stage converts FP16 inputs into the FP4 layout (Table~\ref{tab:prep}).
+A prep stage converts FP16 inputs into the FP4 layout (Table~\ref{tab:prep}). Stats and KV quant each read
+all of K and V and run at 87 and 89\,\% of DRAM bandwidth; sampling the stats cuts prep from 0.733 to
+0.482\,ms at 122880 keys and from 0.162 to 0.138\,ms at 32768 keys. Over all pairs of six dumps the mean
+cosine moves by $-8.6\cdot10^{-5}$ to $+4.8\cdot10^{-5}$, as much as rounding the exact head scales to powers of two
+alone ($-1.1\cdot10^{-4}$ to $+4.5\cdot10^{-5}$). The times and accuracies in Section~\ref{sec:eval} use exact
+stats (0.3.0).
 
 \begin{table}[t]
 \centering\small
@@ -109,9 +114,12 @@ A prep stage converts FP16 inputs into the FP4 layout (Table~\ref{tab:prep}).
 \toprule
 Step & Output \\
 \midrule
-stats & per (batch, KV head): K column sums per chunk of 16 tiles, K and V absolute maxima \\
-finalize & K mean $\bar k$ (chunks summed in order), head scales $g_k$, $g_v$ \\
-KV quant & per tile a 9216\,B blob: K (mean-centred) and $V^\top$ in E2M1, one UE4M3 scale per 16 values \\
+stats & per (batch, KV head): K column sums per chunk of 16 tiles, K and V absolute maxima; every $s$-th chunk
+  only, at least 16 chunks \\
+finalize & K mean $\bar k$ (chunks summed in order), head scales $g_k$, $g_v$: $4\times$ the sampled maxima ($1\times$
+  without sampling), rounded up to powers of two \\
+KV quant & per tile a 9216\,B blob: K (mean-centred) and $V^\top$ in E2M1, one UE4M3 scale per 16 values; a block
+  beyond the UE4M3 range sets a flag that reruns stats over all keys and KV quant, gated on the device \\
 Q quant & packed Q rows in E2M1 with UE4M3 scales; $q\cdot\bar k$ kept for pass 2 \\
 \bottomrule
 \end{tabular}
@@ -257,6 +265,7 @@ has grown by a factor \code{KV\_RESTAT} (1.125, 2 in 0.3.0); then every tile is 
 widened by a headroom factor so later keys fit, and a fingerprint of 48 key values detects a stale cache and triggers a full requantization.
 
 \section{Evaluation}
+\label{sec:eval}
 
 \paragraph{Setup.} RTX 5090 (sm\_120a), CUDA 13. Standalone runs use attention inputs dumped from
 Llama-3.2-3B \cite{grattafiori2024llama3} (24 query heads, 8 KV heads, $d=128$): 2048 query rows against

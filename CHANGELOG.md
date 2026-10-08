@@ -16,7 +16,15 @@
 - Pass 2: one stream of the union of a q block's hot tiles through 3 K/V smem stages, shared by its 12 warps (was 3
   independent 4-warp groups with bar.sync per tile). Outputs bitwise equal; attention at eps 0.005 / 0.01, mean of 3:
   -1.5 / -1.7 % (lc_122880_0), -2.9 / -1.6 % (lc_122880_1), -2.4 / -1.2 % (lc_122880_2), -2.5 / -3.1 % (lc_32768_1);
-  all-exact +2.9 to +3.5 %. Bench: `p2load` (12-warp union) replaces `p2cta`; `APA_UNION=1`, `APA_OUT=file`.
+  all-exact +2.9 to +3.5 %; paged prep+attn 5.076 ms (flat 4.906). Bench: `p2load` (12-warp union) replaces
+  `p2cta`; `APA_UNION=1`, `APA_OUT=file`.
+- Prep: stats over every s-th 1024-key chunk (>= 16 chunks, `APA_PREP_SAMPLE`, 0 = all); sampled head scales x4;
+  head scales rounded up to powers of two. A 16-block beyond the UE4M3 range sets `Workspace::ovf` and reruns
+  exact stats + KV quant on the device (forced test: bitwise equal to exact power-of-two stats). Prep 0.733 -> 0.482 ms
+  (lc_122880_1), 0.162 -> 0.138 ms (lc_32768_0). All pairs, eps 0.005, mean cos
+  exact -> sampled: 0.998512 / 0.999717 / 0.998438 / 0.999037 / 0.999827 / 0.999372 -> 0.998536 / 0.999705 /
+  0.998352 / 0.999046 / 0.999837 / 0.999420; min 0.959676 / 0.975775 / 0.841302 / 0.927517 / 0.980919 / 0.969776 ->
+  0.957087 / 0.972723 / 0.847877 / 0.938131 / 0.990549 / 0.970655; pairs < 0.9: 14 -> 13 (lc_122880_2).
 
 ## 0.3.0 (2026-10-08)
 

@@ -185,6 +185,9 @@ int main(int argc, char** argv) {
   CK(cudaMalloc(&w.dbg, (size_t)n * nh * sizeof(float4)));  // [nkv][R] rows, R = n * G
 #endif
   const float tprep = time([&] { CK(apa::prep(Q, akv, p, w, 0)); });
+  int povf = 0;
+  CK(cudaMemcpy(&povf, w.ovf, 4, cudaMemcpyDeviceToHost));
+  std::printf("prep: sampled-stats overflow redo %d\n", povf);
   std::vector<float> epss{-1.f, 1e-3f, 3e-3f, 1e-2f};
   if (const char* e = std::getenv("APA_EPS")) epss = {(float)std::atof(e)};  // one eps (profiling)
   for (float eps : epss) {
