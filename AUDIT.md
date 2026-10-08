@@ -129,7 +129,7 @@ group is quantized without the -6 clamp if its max is at most 10 (TAU 4) below t
 push a cold group to E2M1 zero only if that group lies more than 2^-42 below the hot tile's max. Nothing bounds
 the FP4 error of the remaining cold mass; the hot test bounds the FP4-estimated share of each cold tile only.
 
-### Claims to correct (later phase)
+### Claims to correct (done in phase 2, see below)
 
 | Claim | Where | Correction |
 |---|---|---|
@@ -140,3 +140,16 @@ the FP4 error of the remaining cold mass; the hot test bounds the FP4-estimated 
 | apa_pass2.cuh:6 "f16 x f16 -> f32" | code comment | fixed in phase 1: "f16 accumulate" |
 | Proposition | paper 3.2 | holds for FP4 estimates of l_t and lambda |
 | PPL table "ppl_corpus_45k" | README, paper Table 7 | name the file: ppl_corpus_45k_gemma4_turn.txt (chat-turn wrapped), differs from imp ppl_corpus_45k.txt (plain); with chunk 2048 and apa_min_kv 8192 APA only runs on chunks with kv >= 8192 |
+
+## Phase 2: claim corrections (README, CHANGELOG, paper)
+
+| Claim | Change |
+|---|---|
+| worst-case cos 0.944326 / -0.444615 | all-pairs minima everywhere (0.841302 / -0.638155); sample minima kept only where labelled |
+| cos columns | README: pooled cos, mean cos, min cos, pairs < 0.9 from `APA_FULL`; paper Tables 4 / 5 labelled sample mode |
+| speedups | paper: attention kernel only, prep excluded; with prep 2.196x at 122880 keys |
+| Proposition, contributions | stated for FP4 estimates; FP32 cold-tile share up to 0.0118 at eps 0.005 |
+| cold-frame guarantee | paper 3.2: 2^-42 bound, no bound on remaining cold FP4 error |
+| "with delta = 0 bitwise 0.2.0" | not measured bitwise; now "reproduces the 0.2.0 metrics to all six printed digits" |
+| "probabilities near 2^-20 of the sink" | was an estimate; replaced by measured "largest cold tile <= 0.0025" |
+| PPL corpus | both files named; imp 0.3.0 numbers (relayed, PERF_LOG) added with their setup |

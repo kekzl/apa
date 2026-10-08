@@ -16,35 +16,56 @@ then the diagonal backwards.
 
 ## Results
 
-Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24 / 8 heads), eps 0.005, cos vs FP32
-(512 sampled rows):
+Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880 or 32768, 24 / 8 heads), eps 0.005, every
+(row, head) pair (49152) vs FP32 (`APA_FULL=1`), one run (PERF_LOG.md, `ab_*_rel32`):
 
-| Dump | cos mean | cos min | hot tiles | attn ms | prep ms |
-|---|---|---|---|---|---|
-| lc_122880_0 | 0.999484 | 0.969733 | 10.3 % | 4.686 | 0.735 |
-| lc_122880_1 | 0.999791 | 0.997192 | 9.6 % | 4.707 | 0.731 |
-| lc_122880_2 | 0.999400 | 0.944326 | 6.0 % | 4.977 | 0.733 |
-| lc_32768_0 | 0.999634 | 0.967587 | 39.5 % | 2.280 | 0.162 |
-| lc_32768_1 | 0.999906 | 0.996628 | 23.6 % | 1.891 | 0.161 |
-| lc_32768_2 | 0.999787 | 0.987198 | 17.5 % | 1.896 | 0.161 |
+| Dump | pooled cos | mean cos | min cos | pairs < 0.9 | hot tiles | attn ms | prep ms |
+|---|---|---|---|---|---|---|---|
+| lc_122880_0 | 0.999459 | 0.998512 | 0.959676 | 0 | 10.3 % | 4.490 | 0.737 |
+| lc_122880_1 | 0.999805 | 0.999717 | 0.975775 | 0 | 9.6 % | 4.759 | 0.744 |
+| lc_122880_2 | 0.999393 | 0.998438 | 0.841302 | 14 | 6.0 % | 4.840 | 0.740 |
+| lc_32768_0 | 0.999642 | 0.999037 | 0.927517 | 0 | 39.5 % | 2.285 | 0.163 |
+| lc_32768_1 | 0.999909 | 0.999827 | 0.980919 | 0 | 23.6 % | 1.889 | 0.163 |
+| lc_32768_2 | 0.999778 | 0.999372 | 0.969776 | 0 | 17.5 % | 1.863 | 0.162 |
 
-APA 0.2.0 on the same run: cos min 0.898838 / 0.970893 / -0.444615 / 0.879942 / 0.984021 / 0.100775 at equal
-speed (hot sink pushed cold P below the FP4 scale floor, see CHANGELOG 0.3.0).
+| Term | Definition |
+|---|---|
+| pooled cos | cosine of all pairs' outputs concatenated (the bench's default `cos`, there over 512 sampled pairs) |
+| mean cos / min cos | mean / minimum of the 49152 per-pair cosines |
+| hot tiles | share of active (warp, tile) pairs sent to pass 2 |
+| attn ms | fused attention kernel, prep excluded; min over 5 reps of 5 launches; drifts up to 10 % between runs |
 
-Same code with every tile exact (`eps < 0`): lc_122880_1 12.431 ms, cos 0.999634 (f16 O); `-DAPA_P2_F32O=1`:
-17.339 ms, cos 1.000000, min 0.999997. Deterministic: 5 reruns of prep +
-attention give bitwise identical outputs (`APA_DET=1`).
+APA 0.2.0 in the same run: min cos 0.634875 / 0.925502 / -0.638155 / 0.757021 / 0.927160 / -0.594803, pairs < 0:
+0 / 0 / 789 / 0 / 0 / 110, attn 4.555 / 4.676 / 4.758 / 2.245 / 1.881 / 1.856 ms (cause: AUDIT.md, Phase 1).
 
-In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`, APA 0.2.0), Llama-3.2-3B Q8_0, 106451-token prompt,
-`--max-seq-len 108000`, prefill ms:
+Same code with every tile exact (`eps < 0`, pass 2 alone, f16 O), all pairs: lc_122880_1 mean cos 0.999505, min
+0.974166; lc_122880_2 mean 0.993600, min 0.834726. `-DAPA_P2_F32O=1` (512-pair sample): lc_122880_1 cos
+1.000000, min 0.999997, 12.431 -> 17.339 ms. Deterministic: 5 reruns of prep + attention give bitwise identical
+outputs (`APA_DET=1`).
+
+In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`), measured by the imp integration (relayed, PERF_LOG.md).
+APA e71624b (0.3.0), default sparse prefill, `apa_min_kv 8192`, mean of 2, prefill ms:
+
+| Model | Prompt tokens | FA2 (`apa_eps 0`) | APA eps 0.01 |
+|---|---|---|---|
+| Llama-3.2-3B | 106451 | 6746.01 | 4824.90 |
+| Qwen3-4B-2507 | 112280 | 8802.52 | 6969.61 |
+| Qwen3-8B | 33727 | 3227.40 | 2848.55 |
+| Qwen3-14B Q6_K | 33727 | 5608.78 | 5191.51 |
+
+Perplexity, APA e71624b, eps 0.01, `imp-cli --perplexity`, chunk 2048: Llama-3.2-3B 18.2760 -> 18.2836, Qwen3-8B
+10.7522 -> 10.7549 (imp `tools/analysis/ppl_corpus_45k.txt`, 44994 bytes, plain); Qwen3-14B long8_32k 2.5249 ->
+2.5248.
+
+APA 0.2.0 in imp, Llama-3.2-3B Q8_0, 106451-token prompt, `--max-seq-len 108000`, prefill ms:
 
 | Mode | FA2 | APA eps 0.005 |
 |---|---|---|
 | default (sparse prefill) | 6661.95 | 5241.18 |
 | dense (`sparse_prefill_topk_tokens=0`) | 11659.35 | 6433.23 |
 
-Perplexity, APA 0.2.0, not yet re-measured for 0.3.0 (imp, ppl_corpus_45k, 13-14k tokens; 0.2.0 repeats 0.1.0
-exactly, the eps 0.002 / 0.01 rows are 0.1.0):
+Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly at eps 0.005), corpus
+`ppl_corpus_45k_gemma4_turn.txt` (46359 bytes, chat-turn wrapped; not the imp file above), 13-14k tokens:
 
 | Variant | Llama-3.2-3B Q8_0 | Qwen3-8B Q8_0 | default-mode prefill ms |
 |---|---|---|---|

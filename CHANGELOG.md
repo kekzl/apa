@@ -3,16 +3,19 @@
 ## 0.3.0 (2026-10-08)
 
 - Pass 1 cold frame: a hot tile lifts the running max of the cold accumulation to at most its own max - 32
-  (log2, `APA_HOT_DROP`). Before, a hot sink set the frame and cold P fell below the UE4M3 scale floor
-  (2^-6) to E2M1 zero: the worst row (lc_122880_2 s 190 h 20) lost its whole cold part (|out| 0.2531 =
-  |hot pv| 0.2527, |ref| 0.1670). eps 0.005, cos min over 6 dumps: -0.444615 / 0.100775 / 0.879942 /
-  0.898838 / 0.970893 / 0.984021 -> 0.944326 / 0.987198 / 0.967587 / 0.969733 / 0.997192 / 0.996628.
-  Speed equal within noise; paged path same accuracy; incremental min -0.431078 -> 0.822568; deterministic.
-- `APA_P2_F32O=1` (default 0): pass-2 O in fp32 across tiles, f16 per 16-token k-step. All-exact cos
-  lc_122880_1 mean 0.999634 -> 1.000000, min 0.988660 -> 0.999997 (12.431 -> 17.339 ms); attn at eps 0.005
-  +14.5 % (lc_122880_1) and +24.9 % (lc_32768_1), register spills, cos mean 0.999791 -> 0.999804.
-- Bench: `APA_DIAG=1` prints the worst sampled row (norms, V cancellation, hot / cold mass).
-- imp perplexity and prefill numbers in the README are 0.2.0 (not yet re-measured).
+  (log2, `APA_HOT_DROP`). Before, a hot sink set the frame; cold 16-key groups more than 2^-10 below it hit
+  the -6 scale clamp and became E2M1 zero (AUDIT.md, Phase 1). All 49152 pairs, eps 0.005, min cos
+  lc_122880_{0,1,2}, lc_32768_{0,1,2}: 0.634875 / 0.925502 / -0.638155 / 0.757021 / 0.927160 / -0.594803 ->
+  0.959676 / 0.975775 / 0.841302 / 0.927517 / 0.980919 / 0.969776; pairs < 0: 789 (lc_122880_2) and 110
+  (lc_32768_2) -> 0. Speed equal within noise (same run); paged path same accuracy; incremental (512-pair
+  sample) min -0.431078 -> 0.822568; deterministic.
+- Bulk copy into `shared::cta` (was `shared::cluster`): no `__cuda_syscall_cp_async_bulk_unicast`, first launch
+  no longer raises the stack limit to 14448 B/thread (about 3.5 GB local memory).
+- `APA_P2_F32O=1` (default 0): pass-2 O in fp32 across tiles, f16 per 16-token k-step. All-exact lc_122880_1
+  (512-pair sample) cos 0.999634 -> 1.000000, min 0.988660 -> 0.999997 (12.431 -> 17.339 ms); attn at eps 0.005
+  +14.5 % (lc_122880_1) and +24.9 % (lc_32768_1), register spills, cos 0.999791 -> 0.999804.
+- Bench: `APA_FULL=1` (all pairs vs FP32, histogram, relL2, top-20), `APA_REF_CACHE`, `-DAPA_DBG` pass-1 row
+  export, `APA_DIAG=1` (worst sampled row). Comment fixes: pass 2 accumulates in f16; stray `#pragma unroll`.
 
 ## 0.2.0 (2026-10-08)
 

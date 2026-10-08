@@ -28,10 +28,11 @@ $PV$ product and are recomputed by a second pass in exact FP16; the two partial 
 log-sum-exp. Both passes run in one fused launch with persistent pass-2 workers. A hot tile must not set the
 reference maximum of the FP4 accumulation: when an attention sink does, the remaining probabilities fall
 below the FP4 scale range and round to zero. Keeping the cold frame at most $2^{32}$ below hot maxima raises
-the worst-case cosine similarity over six Llama-3.2-3B attention dumps from $-0.444615$ to 0.944326 at
-unchanged speed. At $\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and APA runs
-2.50$\times$ faster than the same kernel with every tile exact; the speedup grows with context from
-1.30$\times$ at 8192 keys. Integrated into the imp inference engine (version 0.2.0 of the kernel), dense
+the minimum cosine similarity over all 49152 (row, head) pairs of the worst of six Llama-3.2-3B attention
+dumps from $-0.638155$ to 0.841302 and removes all 899 pairs with negative cosine (six dumps), at unchanged speed. At
+$\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and the attention kernel runs
+2.50$\times$ faster than the same kernel with every tile exact (2.196$\times$ with the 0.730\,ms quantization
+step included); the speedup grows with context from 1.30$\times$ at 8192 keys. Integrated into the imp inference engine (version 0.2.0 of the kernel), dense
 prefill of a 106451-token prompt drops from 11659.35\,ms (FlashAttention-2) to 6433.23\,ms (1.81$\times$),
 with perplexity below FlashAttention-2 with FP16 or FP32 accumulation on Llama-3.2-3B and Qwen3-8B. The kernel is deterministic (bitwise identical across reruns), supports GQA, paged
 KV caches and chunked prefill with an incremental tile cache, and is released as a header-only CUDA library
@@ -57,7 +58,8 @@ online inside the FP4 pass from quantities the pass computes anyway, so it costs
 Contributions:
 \begin{itemize}
 \item A two-pass attention scheme with an online hot-tile test whose cold verdicts are monotone safe: the
-  running row sum only grows, so a tile judged cold stays below $\eps$ of the final row sum (Section~\ref{sec:hot}).
+  running row sum only grows, so a tile judged cold stays below $\eps$ of the final row sum, both as estimated
+  in FP4 (Section~\ref{sec:hot}).
 \item A pass-1 tile order (sink tile first, then the diagonal backwards) that puts high-mass tiles into the
   running sum early, so the test judges middle tiles against a near-final denominator.
 \item A cold reference frame decoupled from hot tiles, with a diagnosis of the failure it removes: rows whose
@@ -167,10 +169,11 @@ while $\ell_{\text{cold}}$ and $o$ accumulate only cold ones. A tile is hot for 
 16 rows, its row sum exceeds $\eps\lambda$. The test is warp-uniform (\code{\_\_any\_sync}), so the hot
 mask has one bit per (warp, tile).
 
-\smallskip\noindent\textbf{Proposition.} Let $\lambda_t$ be the running sum after tile $t$ and $\lambda_\infty$
-the final sum, both in the frame of the final maximum. Every tile $t$ that pass 1 marks cold satisfies
-$\ell_t\le\eps\lambda_\infty$, and the cold tiles together carry at most $n_c\,\eps$ of the row's mass,
-where $n_c$ is their number.
+\smallskip\noindent\textbf{Proposition.} Let $\ell_t$ be pass 1's FP4 row sum of tile $t$, $\lambda_t$ the
+running sum after tile $t$ and $\lambda_\infty$ the final sum, all in the frame of the final maximum. Every tile
+$t$ that pass 1 marks cold satisfies $\ell_t\le\eps\lambda_\infty$, and the cold tiles together carry at most
+$n_c\,\eps$ of $\lambda_\infty$, where $n_c$ is their number. The statement is about the FP4 estimates; the
+FP32 share of a cold tile can exceed $\eps$ (Section~\ref{sec:diag}: up to 0.0118 at $\eps=0.005$).
 
 \smallskip\noindent\emph{Proof.} A rescale multiplies $\ell_t$, $\lambda$ and all later sums by the same
 factor, so shares are frame-invariant. Sums of exponentials are non-negative, hence $\lambda_t\le\lambda_\infty$
@@ -186,13 +189,18 @@ the worst-case rows in Section~\ref{sec:limits}.
 The frame $m$ sets the scale of every later $P'$. The per-group exponent $k$ is clamped at $-6$ so that
 $2^k$ stays a normal UE4M3 value; a group whose maximum lies more than about $2^{-10}$ below the frame
 therefore quantizes to values under 0.25 and rounds to E2M1 zero. In APA 0.2.0 the frame was the running
-maximum over all tiles. The sink tile, visited first and usually hot, then set $m$, and in rows where the
-remaining probabilities sit near $2^{-20}$ of the sink every cold tile vanished (Section~\ref{sec:diag}).
+maximum over all tiles. The sink tile, visited first and usually hot, then set $m$, and in rows whose
+remaining mass is spread thinly (largest cold tile at most 0.0025 of the row) most cold groups vanished
+(Section~\ref{sec:diag}).
 Hot tiles do not need $m$: their $P'$ is used only for $\ell_t$, computed in the candidate frame $c$, and
 pass 2 recomputes them. APA 0.3.0 therefore lets a hot tile lift the frame only to $\max(m, c-\delta)$ with
 $\delta=32$; $\lambda$ absorbs the hot sum as $2^{c-f}\ell_t\le2^{32}\ell_t$, well inside FP32 range. A cold
-tile commits its candidate as before, so with $\delta=0$ the kernel is bitwise 0.2.0. Frames are row-wise;
-the proposition above holds unchanged, since all sums still share one frame.
+tile commits its candidate as before; with $\delta=0$ the kernel reproduces the 0.2.0 metrics to all six
+printed digits on six dumps. Frames are row-wise; the proposition above holds unchanged, since all sums still
+share one frame. What the change guarantees: a cold group is quantized without the $-6$ clamp if its maximum
+lies at most $2^{-10}$ below the frame, and a hot tile moves the frame to at most $2^{-32}$ of its own
+maximum, so a hot tile can push a cold group to zero only if that group lies more than $2^{-42}$ below the
+hot tile's maximum. Nothing bounds the FP4 error of the cold mass that remains.
 
 \paragraph{Tile order.} The denominator $\lambda$ is small early in the loop, which makes early tiles look
 hot. Pass 1 therefore visits tile 0 first (the attention sink \cite{xiao2024streamingllm}), then the
@@ -249,8 +257,13 @@ keys fit, and a fingerprint of 48 key values detects a stale cache and triggers 
 \paragraph{Setup.} RTX 5090 (sm\_120a), CUDA 13. Standalone runs use attention inputs dumped from
 Llama-3.2-3B \cite{grattafiori2024llama3} (24 query heads, 8 KV heads, $d=128$): 2048 query rows against
 122880 keys (lc\_122880\_\{0,1,2\}) or 32768 keys (lc\_32768\_\{0,1,2\}). Accuracy is the cosine similarity
-against an FP32 reference on 512 sampled (row, head) pairs; we report mean and minimum. Times are the
-minimum over 5 repetitions of the mean of 5 launches (CUDA events). Absolute times drift by up to 10\,\%
+against an FP32 reference, in two modes. \emph{All pairs}: every one of the $2048\cdot24=49152$ (row, head)
+pairs; we report the mean and minimum of the per-pair cosines and the number of pairs below 0.9 and 0.
+\emph{Sample}: 512 pairs drawn with a fixed seed (1.04\,\%); ``cos'' is then the pooled cosine of all
+sampled outputs concatenated and ``min'' the sample minimum, which overstates the all-pairs minimum on every
+dump (Table~\ref{tab:cold}). Tables state their mode. Times are the minimum over 5 repetitions of the mean
+of 5 launches (CUDA events) of the fused attention kernel; the quantization step (prep) is timed separately
+and excluded unless stated. Absolute times drift by up to 10\,\%
 between runs on this GPU (lc\_122880\_1 at $\eps=0.005$: 4.707 and 5.200\,ms in two runs), so every
 comparison below is taken within one run. Hot share is the fraction of active (warp, tile) pairs flagged
 hot. The kernel is deterministic, so accuracy figures do not vary between runs.
@@ -258,9 +271,10 @@ hot. The kernel is deterministic, so accuracy figures do not vary between runs.
 \subsection{Diagnosing the worst rows}
 \label{sec:diag}
 
-APA 0.2.0 reached a cosine of $-0.444615$ on one sampled row of lc\_122880\_2. A diagnostic mode of the
-benchmark (\code{APA\_DIAG=1}) decomposes the reference output of the worst row into the contributions of
-the tiles pass 1 marked hot and cold (Table~\ref{tab:diag}).
+In sample mode APA 0.2.0 reached a cosine of $-0.444615$ on lc\_122880\_2; over all pairs the minimum is
+$-0.638155$, with 789 pairs below 0 (Table~\ref{tab:cold}). A diagnostic mode of the benchmark
+(\code{APA\_DIAG=1}) decomposes the reference output of the worst sampled pair into the contributions of the
+tiles pass 1 marked hot and cold (Table~\ref{tab:diag}).
 
 \begin{table}[t]
 \centering\small
@@ -279,49 +293,66 @@ $\|$ref$\| / \sum_j p_j\|v_j\|$ & 0.1997 & 0.1479 \\
 cosine & $-0.4446$ & 0.8766 \\
 \bottomrule
 \end{tabular}
-\caption{Worst sampled row of lc\_122880\_2. Left: FP4 cold part. Right: every tile exact, f16 output
-accumulation in pass 2.}
+\caption{Worst sampled pair of lc\_122880\_2 (sample mode). Left: FP4 cold part. Right: every tile exact,
+f16 output accumulation in pass 2.}
 \label{tab:diag}
 \end{table}
 
 In the left column, the sink tile holds 0.916 of the softmax mass, yet the 8\,\% spread over the other
 1890 tiles carries an output component (0.3634) larger than the whole reference (0.1670): the two parts
-nearly cancel, and $\|$ref$\|$ is only 0.20 of the probability-weighted mean value norm. The APA output norm 0.2531 equals the
-hot part alone (0.2527): the cold contribution was lost entirely, the FP4 underflow of
+nearly cancel, and $\|$ref$\|$ is only 0.20 of the probability-weighted mean value norm. The APA output norm
+0.2531 equals the hot part alone (0.2527): the cold contribution was lost, the FP4 underflow of
 Section~\ref{sec:coldframe}. In the right column every tile is exact, yet the cosine is 0.8766: pass 2
 accumulates $O$ in f16, and next to the sink each small tile's contribution falls under half an f16 ulp of
-the accumulator. Both failures share the pattern of a dominant, low-value sink and a high-value tail.
+the accumulator.
+
+\paragraph{All pairs.} The full mode (\code{APA\_FULL=1}) adds, for the 20 worst pairs of a run, the FP32
+mass of the warp's cold tiles and, in a debug build, pass 1's own $m$, $\lambda$ and $\ell_{\text{cold}}$.
+All 20 worst pairs of every $\eps=0.005$ run are on the merge path (their warp has hot tiles). For the 8
+worst pairs of lc\_122880\_2 under 0.2.0 the FP32 cold mass is 0.0962 to 0.1511, the FP4 estimate
+$\ell_{\text{cold}}/\lambda$ only 0.0069 to 0.0254, with $m$ at 21.94 to 22.68 (the sink's frame): the
+tail was quantized away. Under 0.3.0 the FP4 estimate is 0.0462 to 0.0977 against FP32 0.0548 to 0.0903.
+Three other explanations were tested and rejected as the cause: cold tiles whose FP32 share exceeds $\eps$
+occur only on lc\_122880\_1 (FP32 share up to 0.0118), in pairs with cosine $\ge 0.975775$; the worst heads have an ordinary per-channel
+spread of $|K|$ and $|Q|$ maxima (max/median 3.2 and 3.7 to 4.1, while heads with spreads up to 10.8 are not
+among the worst); visiting tiles in ascending order (\code{APA\_ORDER=0}) leaves 787 pairs below 0. An exact
+running maximum (\code{-DAPA\_EXACT\_MAX}, $\tau=0$) widens the unclamped range of a group by $2^4$ and
+already removes the negative pairs of 0.2.0 on lc\_122880\_2 (minimum 0.251078), which points at the scale clamp. Pure FP4
+($\eps=10^9$, no pass 2) has 25 pairs below 0 on lc\_122880\_2, fewer than 0.2.0 with exact hot tiles
+(789). All runs: AUDIT.md and PERF\_LOG.md in the repository.
 
 \begin{table}[t]
 \centering\small
-\setlength{\tabcolsep}{2.5pt}
-\begin{tabular}{@{}lrrrrr@{}}
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-& \multicolumn{2}{c}{0.2.0} & \multicolumn{3}{c}{0.3.0} \\
-\cmidrule(lr){2-3}\cmidrule(l){4-6}
-Dump & cos min & ms & cos mean & cos min & ms \\
+& \multicolumn{3}{c}{0.2.0} & \multicolumn{3}{c}{0.3.0} \\
+\cmidrule(lr){2-4}\cmidrule(l){5-7}
+Dump & min & $<0$ & ms & mean & min & ms \\
 \midrule
-lc\_122880\_0 & 0.898838 & 4.666 & 0.999484 & 0.969733 & 4.686 \\
-lc\_122880\_1 & 0.970893 & 4.883 & 0.999791 & 0.997192 & 4.707 \\
-lc\_122880\_2 & $-0.444615$ & 4.998 & 0.999400 & 0.944326 & 4.977 \\
-lc\_32768\_0 & 0.879942 & 2.360 & 0.999634 & 0.967587 & 2.280 \\
-lc\_32768\_1 & 0.984021 & 1.880 & 0.999906 & 0.996628 & 1.891 \\
-lc\_32768\_2 & 0.100775 & 1.894 & 0.999787 & 0.987198 & 1.896 \\
+lc\_122880\_0 & 0.634875 & 0 & 4.555 & 0.998512 & 0.959676 & 4.490 \\
+lc\_122880\_1 & 0.925502 & 0 & 4.676 & 0.999717 & 0.975775 & 4.759 \\
+lc\_122880\_2 & $-0.638155$ & 789 & 4.758 & 0.998438 & 0.841302 & 4.840 \\
+lc\_32768\_0 & 0.757021 & 0 & 2.245 & 0.999037 & 0.927517 & 2.285 \\
+lc\_32768\_1 & 0.927160 & 0 & 1.881 & 0.999827 & 0.980919 & 1.889 \\
+lc\_32768\_2 & $-0.594803$ & 110 & 1.856 & 0.999372 & 0.969776 & 1.863 \\
 \bottomrule
 \end{tabular}
-\caption{Cold frame, $\eps=0.005$, one run. Hot share 0.3.0: 10.3, 9.6, 6.0, 39.5, 23.6, 17.5\,\%;
-prep 0.731 to 0.735\,ms at 122880 keys, 0.161 to 0.162\,ms at 32768.}
+\caption{Cold frame, $\eps=0.005$, all 49152 pairs, one run. ``mean'', ``min'': per-pair cosines; ``$<0$'':
+pairs with negative cosine. 0.3.0 has 0 pairs below 0 and 14 below 0.9 (lc\_122880\_2 only). Sample-mode
+minima of the same builds: 0.898838, 0.970893, $-0.444615$, 0.879942, 0.984021, 0.100775 (0.2.0) and
+0.969733, 0.997192, 0.944326, 0.967587, 0.996628, 0.987198 (0.3.0).}
 \label{tab:cold}
 \end{table}
 
 \subsection{Cold frame}
 
-Table~\ref{tab:cold} compares 0.2.0 ($\delta=0$) with 0.3.0 ($\delta=32$) in one run. The worst row of each
-dump improves, from $-0.444615$ to 0.944326 on lc\_122880\_2 and from 0.100775 to 0.987198 on
-lc\_32768\_2; mean cosines rise on all six dumps. Hot shares change by at most 0.2 points and attention
-times stay within run-to-run noise. The paged path (block size 16) gives the same accuracy as the flat one;
-chunked prefill with the incremental tile cache improves its minimum on lc\_122880\_2 from $-0.431078$ to
-0.822568; 5 reruns stay bitwise identical.
+Table~\ref{tab:cold} compares 0.2.0 ($\delta=0$) with 0.3.0 ($\delta=32$) in one run. The minimum over all
+pairs rises on every dump, from $-0.638155$ to 0.841302 on lc\_122880\_2 and from $-0.594803$ to 0.969776 on
+lc\_32768\_2, and the 899 negative pairs disappear. Attention times stay within run-to-run noise; hot shares
+change by at most 0.2 points. In sample mode, the paged path (block size 16) gives the same accuracy as the
+flat one; chunked prefill with the incremental tile cache improves its sample minimum on lc\_122880\_2 from
+$-0.431078$ to 0.822568; 5 reruns stay bitwise identical.
 
 \subsection{Threshold and context length}
 
@@ -330,7 +361,7 @@ chunked prefill with the incremental tile cache improves its minimum on lc\_1228
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{@{}llrrrr@{}}
 \toprule
-Dump & $\eps$ & hot & cos mean & cos min & ms \\
+Dump & $\eps$ & hot & cos & min & ms \\
 \midrule
 lc\_122880\_1 & exact & 100\,\% & 0.999634 & 0.988660 & 12.292 \\
  & 0.001 & 28.3\,\% & 0.999876 & 0.994971 & 7.794 \\
@@ -351,8 +382,8 @@ lc\_32768\_2 & exact & 100\,\% & 0.999902 & 0.986612 & 3.287 \\
  & 0.02 & 4.9\,\% & 0.998656 & 0.981491 & 1.301 \\
 \bottomrule
 \end{tabular}
-\caption{APA 0.3.0 over $\eps$, one run. ``exact'': every tile in pass 2 ($\eps<0$), f16 output
-accumulation.}
+\caption{APA 0.3.0 over $\eps$, one run, sample mode (``cos'': pooled, ``min'': sample minimum). ``exact'':
+every tile in pass 2 ($\eps<0$), f16 output accumulation.}
 \label{tab:eps}
 \end{table}
 
@@ -371,28 +402,53 @@ keys & exact ms & APA ms & speedup & hot & cos min \\
 \bottomrule
 \end{tabular}
 \caption{Context length: first $N$ keys of lc\_122880\_1 (query rows at $N-2048$ to $N-1$), $\eps=0.005$,
-APA 0.3.0, one run.}
+APA 0.3.0, one run. Attention kernel only, prep excluded; ``cos min'': sample minimum.}
 \label{tab:kv}
 \end{table}
 
 Table~\ref{tab:eps} shows the trade-off. From $\eps=0.001$ to 0.02 the hot share falls by a factor of 9.7
-to 11.2 and attention time by 1.7 to 2.3$\times$, while the mean cosine stays above 0.9978. The minimum is
-flat on lc\_122880\_2 from $\eps=0.003$ on (0.946039, then 0.944326), since its worst rows already have only the sink hot. The all-exact
-run is not the most accurate configuration: its f16 output accumulation gives the lowest minimum on
-lc\_122880\_2 (0.876635). With \code{APA\_P2\_F32O=1} the all-exact run of lc\_122880\_1 reaches a mean of
-1.000000 and a minimum of 0.999997 (12.431 to 17.339\,ms), while at $\eps=0.005$ the same option adds 14.5\,\%
-(lc\_122880\_1) and 24.9\,\% (lc\_32768\_1) to the attention time for a mean cosine of 0.999804 instead of
-0.999791. It is therefore off by default.
+to 11.2 and attention time by 1.7 to 2.3$\times$, while the pooled cosine stays above 0.9978. The sample
+minimum is flat on lc\_122880\_2 from $\eps=0.003$ on (0.946039, then 0.944326), since its worst rows already
+have only the sink hot. The all-exact run is not the most accurate configuration: over all pairs of
+lc\_122880\_2 it reaches a mean of 0.993600, a minimum of 0.834726 and 465 pairs below 0.9, against 0.998438,
+0.841302 and 14 for $\eps=0.005$; its f16 output accumulation is the limit. With \code{APA\_P2\_F32O=1} the
+all-exact run of lc\_122880\_1 reaches (sample mode) 1.000000 and a minimum of 0.999997 (12.431 to
+17.339\,ms), while at $\eps=0.005$ the same option adds 14.5\,\% (lc\_122880\_1) and 24.9\,\% (lc\_32768\_1)
+to the attention time for a pooled cosine of 0.999804 instead of 0.999791. It is therefore off by default.
 
 Table~\ref{tab:kv} shows why the scheme targets long contexts: the hot share falls from 36.0\,\% at 8192
-keys to 9.6\,\% at 122880, and the speedup over the all-exact kernel grows from 1.30 to 2.50$\times$.
+keys to 9.6\,\% at 122880, and the attention speedup over the all-exact kernel grows from 1.30 to
+2.50$\times$ (13.023 / 5.200\,ms). With the quantization step (0.730\,ms at 122880 keys, needed only by APA)
+the ratio at 122880 keys is 2.196$\times$.
 
 \subsection{End to end}
 
-APA is integrated into imp \cite{imp}; the config key is \code{attention.apa\_eps}. The following numbers were
-measured with APA 0.2.0, which differs from 0.3.0 only in the cold frame and runs at the same speed
-(Table~\ref{tab:cold}); 0.3.0 changes the outputs of rows with a dominant sink, so its perplexity has to be
-measured again. Llama-3.2-3B Q8\_0, 106451-token prompt, \code{-{}-max-seq-len 108000}, prefill time:
+APA is integrated into imp \cite{imp}; the config key is \code{attention.apa\_eps}. The imp numbers in this
+section were measured in the imp repository, not with this repository's benchmark; their logs are not part
+of APA. Table~\ref{tab:imp3} uses APA 0.3.0 (commit e71624b), default sparse prefill, \code{apa\_min\_kv} 8192,
+mean of 2 runs; FA2 is \code{apa\_eps} 0.
+
+\begin{table}[h]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Model & tokens & FA2 ms & APA $\eps=0.01$ ms \\
+\midrule
+Llama-3.2-3B & 106451 & 6746.01 & 4824.90 \\
+Qwen3-4B-2507 & 112280 & 8802.52 & 6969.61 \\
+Qwen3-8B & 33727 & 3227.40 & 2848.55 \\
+Qwen3-14B Q6\_K & 33727 & 5608.78 & 5191.51 \\
+\bottomrule
+\end{tabular}
+\caption{imp prefill, APA 0.3.0. Perplexity in the same setup (\code{imp-cli -{}-perplexity}, chunk 2048,
+imp's plain \code{ppl\_corpus\_45k.txt}, 44994 bytes), FA2 $\to$ APA $\eps=0.01$: Llama-3.2-3B 18.2760 $\to$
+18.2836, Qwen3-8B 10.7522 $\to$ 10.7549; Qwen3-14B on long8\_32k 2.5249 $\to$ 2.5248.}
+\label{tab:imp3}
+\end{table}
+
+The remaining imp numbers were measured with APA 0.2.0. Llama-3.2-3B Q8\_0, 106451-token prompt,
+\code{-{}-max-seq-len 108000}, prefill time:
 
 \begin{table}[h]
 \centering\small
@@ -409,7 +465,8 @@ covers the whole prefill, not only attention.}
 \label{tab:imp}
 \end{table}
 
-\paragraph{Perplexity.} Table~\ref{tab:ppl}, imp on ppl\_corpus\_45k (13k to 14k tokens) for Llama-3.2-3B
+\paragraph{Perplexity.} Table~\ref{tab:ppl} uses imp on a chat-turn wrapped corpus,
+\code{ppl\_corpus\_45k\_gemma4\_turn.txt} (46359 bytes, a different file from Table~\ref{tab:imp3}; 13k to 14k tokens), for Llama-3.2-3B
 and Qwen3-8B \cite{yang2025qwen3} in Q8\_0, APA 0.2.0 ($\eps=0.002$ and 0.01 rows: 0.1.0, which 0.2.0
 reproduces exactly at $\eps=0.005$). The two FlashAttention-2 variants differ only in the accumulation type
 and span 17.3644 to 17.3732 (Llama) and 10.7974 to 10.8110 (Qwen). Every APA setting with $\eps>0$ lies
@@ -439,18 +496,20 @@ APA 0.2.0 / 0.1.0.}
 \label{sec:limits}
 
 \begin{itemize}
-\item \textbf{Mass is not output.} The hot test bounds each cold tile's share of the softmax mass, not of
-  the output. The remaining worst row of lc\_122880\_2 (cos 0.944326) has the same shape as
-  Table~\ref{tab:diag}: two hot tiles with 0.921 of the mass, a cold part of norm 0.3109 against a
-  reference of 0.1488, so FP4 score error on the tail decides the result. A test weighted by the value norm
-  of a tile, or a bound on the accumulated cold mass, would target such rows.
-\item \textbf{Chunked prefill.} The incremental tile cache widens head scales for later keys; its minimum
+\item \textbf{Mass is not output.} The hot test bounds each cold tile's FP4 share of the softmax mass, not
+  of the output. The worst pair of 0.3.0 over all pairs (lc\_122880\_2, position 1370, head 18, cosine
+  0.841302) has the shape of Table~\ref{tab:diag}: 3 hot tiles, the largest with 0.9101 of the mass, FP32
+  cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
+  decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
+  would target such rows.
+\item \textbf{Chunked prefill.} The incremental tile cache widens head scales for later keys; its sample minimum
   on lc\_122880\_2 is 0.822568 against 0.944326 for a full requantization.
 \item \textbf{Exact mode.} The f16 output accumulation of pass 2 limits the all-exact configuration;
   the FP32 alternative costs 14.5 to 24.9\,\% at $\eps=0.005$ through register spills.
 \item \textbf{Granularity.} The hot verdict is per (warp, tile): one row of 16 makes the tile exact for all.
 \item \textbf{Scope.} Head dim 128, causal, FP16 inputs, sm\_120a only.
-\item \textbf{Evidence.} Six dumps from one model; end-to-end numbers are from APA 0.2.0. A direct
+\item \textbf{Evidence.} Six dumps from one model; Tables~\ref{tab:eps} and~\ref{tab:kv} and the chunked and
+  paged checks use the 512-pair sample; imp numbers come from the imp repository. A direct
   comparison with FP4 attention kernels such as SageAttention3 \cite{zhang2025sageattention3} on the same
   inputs is open.
 \end{itemize}
@@ -468,8 +527,9 @@ dropping work, with the split decided online from the FP4 pass itself.
 
 \section{Conclusion}
 
-Long-context attention is skewed enough that exact arithmetic on 6 to 10\,\% of the tiles at 122880 keys,
-FP4 on the rest, and an exact log-sum-exp merge run 2.50$\times$ faster than an all-exact kernel. The
+Long-context attention is skewed enough that exact arithmetic on 6 to 10\,\% of the (warp, tile) pairs at 122880
+keys, FP4 on the rest, and an exact log-sum-exp merge make the attention kernel 2.50$\times$ faster than an
+all-exact kernel (2.196$\times$ with quantization). The
 skew that makes this pay also creates the main hazard: a dominant sink can push the informative tail out of
 the FP4 range. Keeping the cold frame independent of hot tiles removes that failure at unchanged speed. The code is
 available at \url{https://github.com/kekzl/apa} under MPL-2.0.
