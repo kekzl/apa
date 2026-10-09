@@ -29,8 +29,11 @@ log-sum-exp. Both passes run in one fused launch with persistent pass-2 workers.
 reference maximum of the FP4 accumulation: when an attention sink does, the remaining probabilities fall
 below the FP4 scale range and round to zero. Keeping the cold frame at most $2^{32}$ below hot maxima raises
 the minimum cosine similarity over all 49152 (row, head) pairs of the worst of six Llama-3.2-3B attention
-dumps from $-0.638155$ to 0.841302 and removes all 899 pairs with negative cosine (six dumps), at unchanged speed. At
-$\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and the attention kernel runs
+dumps from $-0.638155$ to 0.841302 and removes all 899 pairs with negative cosine (six dumps), at unchanged speed. The
+rows that remain worst lose their accuracy to FP4 rounding of $Q$, not of $K$, $P$ or $V$ (host emulation per
+error source); a second FP4 term of $Q$ on its 64 largest channels removes all 137 pairs below cosine 0.9 on twelve
+dumps and raises the worst minimum from 0.773144 to 0.963487, at 4.8 to 15.2\,\% more attention time. At
+$\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and the attention kernel of APA 0.3.0 runs
 2.50$\times$ faster than the same kernel with every tile exact (2.196$\times$ with the 0.730\,ms quantization
 step included); the speedup grows with context from 1.30$\times$ at 8192 keys. Integrated into the imp inference engine (version 0.2.0 of the kernel), dense
 prefill of a 106451-token prompt drops from 11659.35\,ms (FlashAttention-2) to 6433.23\,ms (1.81$\times$),
@@ -70,6 +73,8 @@ Contributions:
   against a ones tile.
 \item A single fused launch: pass-1 CTAs followed by persistent pass-2 workers that pull work from ticket
   counters and wait on per-query-block release flags, deadlock-free by ticket order.
+\item An error-source analysis of the remaining worst rows (FP4 rounding of $Q$) and a two-term FP4 $Q$ on
+  permuted channels that removes it (Section~\ref{sec:qerr}).
 \item Deterministic statistics and an incremental tile cache for chunked prefill over paged KV.
 \end{itemize}
 
@@ -163,6 +168,13 @@ filled by \code{cp.async.bulk} with mbarrier completion (thread 0 is the produce
 $2^k\ge256\cdot\max_{\text{group}}P$, so the quantized values satisfy $P'\le6$ and the scale $2^k$ is an
 exact UE4M3 power of two. The shift is folded into the bias of the exponent, so \code{ex2} directly produces
 $P'$; the global factor 1536 is divided out in the epilogue.
+
+\paragraph{Two-term Q.} $Q$ is quantized twice: $Q_1$ as in Table~\ref{tab:prep} and $Q_2$, the E2M1 residual $Q-Q_1$ in the same row
+scale, so $S=Q_1K^\top+Q_2K^\top$ accumulates in one fragment with the same K operands. \code{APA\_Q2}=2 keeps
+$Q_2$ on the 64 channels of largest $\sum|q|$ of the KV head (every 4th position, all $G$ heads): prep permutes the
+channels of $Q$ and $K$ alike so that they form the first $k$-step, which adds 8 OMMAs per tile (16 for all
+channels, \code{APA\_Q2}=1). The KvState freezes the permutation with its statistics. Section~\ref{sec:qerr}
+shows why: FP4 rounding of $Q$ decides the worst rows.
 
 \paragraph{Lazy maximum.} The running maximum $m$ (log$_2$ domain) is updated, with a full quad reduction
 and a rescale of $o$, $\ell_{\text{cold}}$ and $\lambda$, only when some score exceeds $m+\tau$ with
@@ -373,7 +385,77 @@ covers only the first 65536, 81920, 98304 or 108544 keys gives 431, 222, 104 and
 1452 to 29 pairs below 0.99 (exact stats), at 182.88 instead of 178.32\,ms for 60 chunks. With the sampled stats and
 power-of-two scales of the prep and an overflow redo, every restat chunk equals the full requantization bitwise
 (27 of 60 chunks on lc\_122880\_*); the last chunk reaches 0.821417 and 24 pairs below 0.9 (full
-requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. 5 reruns stay bitwise identical.
+requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. (0.4.0, single-term $Q$.) With two-term $Q$ the last chunk reaches 0.981605 and no pair below 0.9 (full requantization:
+0.977037, 0). 5 reruns stay bitwise identical.
+
+\subsection{Error source of the worst rows}
+\label{sec:qerr}
+
+After 0.4.0 the worst dump is lc\_65536\_0, outside the tables above: 124 pairs below 0.9 at $\eps=0.005$. Its
+20 worst pairs are diffuse rows of one head: FP32 cold mass 0.2263 to 0.3973 spread over 314 to 454 tiles (90\,\%
+of the mass), no cold tile above $\eps$, and a cold output 1.137 to 1.349 times the reference norm. The FP4
+estimate of the cold share matches FP32, so no mass is lost; a fallback on a large cold share is not selective,
+since every warp of the dump has a row with cold share above 0.3. Table~\ref{tab:qerr} emulates on the host one
+quantization at a time on the cold tiles of the 20 worst pairs (hot tiles exact, as pass 2). The emulation with
+all sources reproduces the kernel; $Q$ alone accounts for the error, while $K$, $P$ or $V$ alone keep the mean
+at or above 0.996408. A second FP4 term of $Q$ removes the error, on 64 of 128 channels nearly as well as on all.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Variant & lc\_65536\_0 & lc\_122880\_2 \\
+\midrule
+kernel (0.4.0) & 0.809680 & 0.888434 \\
+emulation, all sources & 0.815728 & 0.890648 \\
+$P$ only & 0.996408 & 0.998214 \\
+$V$ only & 0.999817 & 0.999897 \\
+$K$ only & 0.998618 & 0.999879 \\
+$Q$ only & 0.823032 & 0.907227 \\
+all, $Q$ two FP4 terms & 0.998386 & 0.998000 \\
+all, $Q$ two terms on 64 channels & 0.998099 & 0.996503 \\
+all, $Q$ in FP8 E4M3 & 0.995449 & 0.993688 \\
+\bottomrule
+\end{tabular}
+\caption{Mean cosine of the 20 worst pairs ($\eps=0.005$) when only the named operands of the cold tiles are
+quantized as in pass 1 (host emulation).}
+\label{tab:qerr}
+\end{table}
+
+\begin{table}[t]
+\centering\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+ & \multicolumn{2}{c}{min cos} & \multicolumn{2}{c}{pairs $<0.99$} & \multicolumn{2}{c}{attn ms} \\
+Dump & 1 term & 2 terms & 1 & 2 & 1 & 2 \\
+\midrule
+lc\_122880\_0 & 0.957087 & 0.963487 & 1612 & 1889 & 4.326 & 4.983 \\
+lc\_122880\_1 & 0.972723 & 0.996712 & 13 & 0 & 4.421 & 5.069 \\
+lc\_122880\_2 & 0.847877 & 0.977037 & 1224 & 74 & 4.602 & 5.206 \\
+lc\_65536\_0 & 0.773144 & 0.977662 & 1296 & 76 & 2.885 & 3.110 \\
+lc\_65536\_1 & 0.985146 & 0.997799 & 6 & 0 & 2.981 & 3.130 \\
+lc\_65536\_2 & 0.909434 & 0.988146 & 370 & 6 & 2.868 & 3.164 \\
+lc\_32768\_0 & 0.938131 & 0.984118 & 503 & 18 & 2.364 & 2.519 \\
+lc\_32768\_1 & 0.990549 & 0.997834 & 0 & 0 & 1.835 & 1.923 \\
+lc\_32768\_2 & 0.970655 & 0.984406 & 170 & 11 & 1.844 & 1.938 \\
+ra2dump\_59 & 0.993380 & 0.997276 & 0 & 0 & 0.169 & 0.164 \\
+ra2dump\_78 & 0.991309 & 0.983548 & 0 & 2 & 0.149 & 0.155 \\
+ra2dump\_87 & 0.983843 & 0.996497 & 2 & 0 & 0.295 & 0.294 \\
+\bottomrule
+\end{tabular}
+\caption{Single-term $Q$ (\code{APA\_Q2}=0) vs two terms on 64 channels (\code{APA\_Q2}=2), all 49152 pairs,
+$\eps=0.005$, one run. Pairs below 0.9: 13 and 124 (lc\_122880\_2, lc\_65536\_0) $\to$ 0 on all dumps. ra2dump:
+2048 queries at 2048 or 4096 keys.}
+\label{tab:q2}
+\end{table}
+
+Table~\ref{tab:q2} shows the kernel with \code{APA\_Q2}=2. All 137 pairs below 0.9 disappear, the worst minimum
+rises from 0.773144 to 0.963487, and pairs below 0.99 fall on 8 of 12 dumps (lc\_122880\_0 and ra2dump\_78 rise; lc\_32768\_1 and
+ra2dump\_59 stay at 0). Attention time grows by 4.8 to 15.2\,\% on the nine long dumps; pass 1 alone by 13.5 to
+19.0\,\% (24.1 to 30.7\,\% with the residual on all channels; two runs). With two terms, $\eps=0.01$ is faster than one term at
+0.005 up to 65536 keys (lc\_32768\_0: 1.670 against 2.364\,ms) with no pair below 0.9 on the twelve dumps.
 
 \subsection{Threshold and context length}
 
@@ -527,11 +609,11 @@ APA 0.2.0 / 0.1.0.}
   0.841302) has the shape of Table~\ref{tab:diag}: 3 hot tiles, the largest with 0.9101 of the mass, FP32
   cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
   decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
-  would target such rows. lc\_65536\_0, outside the tables, is the worst dump measured: 124 pairs below 0.9 at
-  $\eps=0.005$ (min 0.773144; 0.3.0 prep: 149, 0.747445).
+  would target such rows. With two-term $Q$ the worst pair of twelve dumps has cosine 0.963487
+  (lc\_122880\_0), which also has the most pairs below 0.99 (1889).
 \item \textbf{Chunked prefill.} The incremental tile cache keeps the K mean of its last restat; on
   lc\_122880\_2 the pairs below 0.9 grow from 24 to 431 as the context grows to 1.84 times the keys of that mean
-  (1.11 times: 56). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score
+  (1.11 times: 56; single-term $Q$; with two-term $Q$ the last chunk has none). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score
   offset would remove it.
 \item \textbf{Exact mode.} The f16 output accumulation of pass 2 limits the all-exact configuration;
   the FP32 alternative costs 14.5 to 24.9\,\% at $\eps=0.005$ through register spills.

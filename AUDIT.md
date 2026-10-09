@@ -219,3 +219,34 @@ Runs: PERF_LOG "Phase 5". Reusable: `bench/test.sh` (12 dumps x 9 checks + 7 bui
 
 Open: lc_65536_0 (124 pairs < 0.9 at eps 0.005, 0.3.0 prep: 149) is the worst dump measured; cause not
 measured yet (`-DAPA_DBG` top-20 as in Phase 1).
+
+## Phase 6: worst rows after 0.4.0 (lc_65536_0, lc_122880_2)
+
+Runs: PERF_LOG "Phase 6". lc_65536_0, eps 0.005, top 20 (`-DAPA_DBG`): all q head 19, FP32 cold mass 0.2263 to 0.3973,
+largest cold tile 0.0021 to 0.0042 (< eps), n90 314 to 454 tiles, |cold pv| / |ref| 1.137 to 1.349; FP4 cold share
+l_cold / lambda 0.2211 to 0.4289 (matches FP32: no mass loss). A cold-share fallback (warp all exact above th) is
+not selective: every warp of lc_65536_0 has a row with cold share > 0.3.
+
+Error source, host emulation of one quantization at a time on the cold tiles, mean cos of the top 20 (`APA_ERRSRC=1`):
+
+| Variant | lc_65536_0 | lc_122880_2 | lc_122880_1 |
+|---|---|---|---|
+| kernel | 0.809680 | 0.888434 | 0.985629 |
+| emulation, all sources | 0.815728 | 0.890648 | 0.985236 |
+| P only (E2M1, power-of-two scale per 16 keys) | 0.996408 | 0.998214 | 0.999797 |
+| V only (E2M1 x UE4M3 per 16 tokens) | 0.999817 | 0.999897 | 0.999982 |
+| QK only | 0.820737 | 0.908953 | 0.984609 |
+| Q only | 0.823032 | 0.907227 | 0.986258 |
+| K only (mean-centred) | 0.998618 | 0.999879 | 0.999669 |
+| all, Q as two FP4 terms | 0.998386 | 0.998000 | 0.999528 |
+| all, Q in FP8 E4M3 | 0.995449 | 0.993688 | 0.999248 |
+| all, Q two FP4 terms on 64 channels | 0.998099 | 0.996503 | - |
+
+Cause: FP4 (E2M1) rounding of Q. Q only reproduces the kernel error; K, P or V alone stay at or above 0.996408.
+Fix: `APA_Q2` 2 (CHANGELOG Unreleased). 12 dumps, all pairs, eps 0.005: pairs < 0.9 137 -> 0, worst min 0.773144 -> 0.963487.
+
+bench/test.sh with `APA_Q2=2`: 117 ok (all checks of Phase 5; legacy `APA_PREP_SAMPLE=0 APA_Q2=0` = pre-0.4.0 build bitwise).
+`APA_Q2=0` = 0.4.0 bitwise (3 dumps). KvState last chunk, lc_122880_2: min 0.981605, 0 pairs < 0.9 (single-term: 0.821417, 24).
+
+Open: prep +0.04 ms at 122880 keys (0.480 -> 0.520), +0.06 ms at 32768 (0.138 -> 0.196) from the channel order
+(q_perm_kernel, permuted quant_kv / quant_q); not profiled.

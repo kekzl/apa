@@ -65,7 +65,8 @@ __device__ __forceinline__ void load_q(uint32_t (&qa)[Cfg<D>::KSTEPS][4], uint32
 template <int D>
 __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[Cfg<D>::KSTEPS][4],
                                         const uint32_t (&qsf)[Cfg<D>::KSTEPS], uint32_t stage, const uint8_t* sgen,
-                                        const uint32_t (&k_lane)[Cfg<D>::CPR / 4], int T1) {
+                                        const uint32_t (&k_lane)[Cfg<D>::CPR / 4], int T1,
+                                        const uint32_t (*qa2)[4] = nullptr, const uint32_t* qsf2 = nullptr) {
   using C = Cfg<D>;
   constexpr int KST = C::KSTEPS;
   const uint8_t* ksb = sgen + C::K_BYTES + C::V_BYTES + T1 * (D / 2);
@@ -84,6 +85,13 @@ __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[C
 #pragma unroll
     for (int nt = 0; nt < 8; ++nt)
       mma_fp4(s[nt], qa[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf[ks], ksw[nt * KST + ks]);
+#if APA_Q2
+#pragma unroll
+  for (int ks = 0; ks < (APA_Q2 == 2 ? 1 : KST); ++ks)  // APA_Q2 2: residual on the first k-step (perm channels)
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt)
+      mma_fp4(s[nt], qa2[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf2[ks], ksw[nt * KST + ks]);
+#endif
 }
 
 // Causal diagonal / KV tail: col > lim -> -inf.
@@ -215,6 +223,9 @@ __device__ __forceinline__ void pv_tile(float (&o)[Cfg<D>::DT][4], const uint32_
 template <int D>
 struct WarpQ {
   uint32_t qa[Cfg<D>::KSTEPS][4], qsf[Cfg<D>::KSTEPS];
+#if APA_Q2
+  uint32_t qa2[Cfg<D>::KSTEPS][4], qsf2[Cfg<D>::KSTEPS];  // residual Q term
+#endif
   uint32_t k_lane[Cfg<D>::CPR / 4], v_lane;
   float c_lo, c_hi;  // log2 score = s * c (per row)
   int T0, T1, pos_lo, pos_hi, p_wmin;
@@ -226,7 +237,11 @@ template <int D, bool CAUSAL>
 __device__ __forceinline__ bool tile_step(Rows<Cfg<D>::DT>& w, const WarpQ<D>& q, uint32_t stage,
                                           const uint8_t* sgen, int j0, const Dims& dm, float eps) {
   float s[8][4];
+#if APA_Q2
+  qk_tile<D>(s, q.qa, q.qsf, stage, sgen, q.k_lane, q.T1, q.qa2, q.qsf2);
+#else
   qk_tile<D>(s, q.qa, q.qsf, stage, sgen, q.k_lane, q.T1);
+#endif
   if ((CAUSAL && j0 + BKV - 1 > q.p_wmin) || j0 + BKV > dm.Skv) {
     const int lim_lo = CAUSAL ? min(q.pos_lo, dm.Skv - 1) : dm.Skv - 1;
     const int lim_hi = CAUSAL ? min(q.pos_hi, dm.Skv - 1) : dm.Skv - 1;
@@ -381,6 +396,10 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
   const HeadScale sc = hs[bhk];
   WarpQ<D> q;
   warp_q_init<D>(q, Qq, Qs, Qr, sc.k, q_lo, q_hi, lane);
+#if APA_Q2
+  const size_t qrows = (size_t)dm.B * dm.Hkv * dm.R;
+  load_q<D>(q.qa2, q.qsf2, Qq + qrows * (D / 2), Qs + qrows * (D / 16), q_lo, q_hi, q.T0);
+#endif
   q.pos_lo = dm.q_offset + r_lo / G;
   q.pos_hi = dm.q_offset + (r_lo + 8) / G;
   q.p_wmin = dm.q_offset + min(row0, R - 1) / G;

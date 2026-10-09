@@ -1998,3 +1998,232 @@ chunks 60 x 2048 eps 5e-03: full requant 183.53 ms cos 0.999419 min 0.941224 | i
   full incremental: pooled cos 0.999801 mean cos 0.999708 min 0.971340 cos<0.9 0 cos<0 0
 chunks 60 x 2048 eps 5e-03: full requant 196.14 ms cos 0.999782 min 0.995919 | incremental 189.50 ms cos 0.999782 min 0.995820
 ```
+
+## 2026-10-09 Phase 6: error source of the worst rows, two-term Q (main e5776cc + APA_Q2)
+
+lc_65536_0, eps 0.005, `-DAPA_DBG` APA_FULL top 20 and fallback study (d_dbg), verbatim:
+
+```
+full eps    5e-03: pairs 49152 pooled cos 0.999236 mean cos 0.997890 min 0.773144 | cos<0.99 1296 cos<0.9 124 cos<0 0 | relL2 mean 0.05568 p50 0.04109 p99 0.27877 p999 0.75567 max 1.05836
+  top  0 s  214 h 19 qb  3 warp 2344 cos 0.773144 relL2 0.8729 | hot  120/ 996 merge | fp32: cold mass 0.2529 max tile 0.1855 max cold tile 0.0027 cold tiles > eps 0 n90 314 |cold pv|/|ref| 1.349 | spread K 4.8 Q 4.1 | fp4: m 9.08 lambda 2551 l_cold 629.3 cold share 0.2467 max tile 1.0000
+  top  1 s 1529 h 19 qb 23 warp 2590 cos 0.789260 relL2 0.6145 | hot  123/1016 merge | fp32: cold mass 0.3501 max tile 0.2515 max cold tile 0.0021 cold tiles > eps 0 n90 445 |cold pv|/|ref| 1.165 | spread K 4.8 Q 4.1 | fp4: m 7.13 lambda 3505 l_cold 1397 cold share 0.3986 max tile 1.0000
+  top  2 s 1940 h 19 qb 30 warp 2667 cos 0.792077 relL2 0.6117 | hot  147/1023 merge | fp32: cold mass 0.3321 max tile 0.2161 max cold tile 0.0028 cold tiles > eps 0 n90 454 |cold pv|/|ref| 1.224 | spread K 4.8 Q 4.1 | fp4: m 7.12 lambda 3633 l_cold 1310 cold share 0.3606 max tile 1.0000
+  top  3 s  853 h 19 qb 13 warp 2464 cos 0.796610 relL2 0.6045 | hot  109/1006 merge | fp32: cold mass 0.3867 max tile 0.2057 max cold tile 0.0028 cold tiles > eps 0 n90 447 |cold pv|/|ref| 1.185 | spread K 4.8 Q 4.1 | fp4: m 7.01 lambda 3753 l_cold 1551 cold share 0.4133 max tile 1.0000
+  top  4 s 1843 h 19 qb 28 warp 2649 cos 0.804915 relL2 0.5948 | hot  121/1021 merge | fp32: cold mass 0.3613 max tile 0.2332 max cold tile 0.0030 cold tiles > eps 0 n90 446 |cold pv|/|ref| 1.183 | spread K 4.8 Q 4.1 | fp4: m 5.98 lambda 7791 l_cold 3177 cold share 0.4078 max tile 1.0000
+  top  5 s 1719 h 19 qb 26 warp 2626 cos 0.805573 relL2 0.8868 | hot   79/1019 merge | fp32: cold mass 0.3342 max tile 0.2137 max cold tile 0.0032 cold tiles > eps 0 n90 333 |cold pv|/|ref| 1.300 | spread K 4.8 Q 4.1 | fp4: m 10.56 lambda 996.4 l_cold 304.3 cold share 0.3054 max tile 1.0000
+  top  6 s 1638 h 19 qb 25 warp 2611 cos 0.805963 relL2 0.8293 | hot   96/1018 merge | fp32: cold mass 0.3068 max tile 0.2018 max cold tile 0.0028 cold tiles > eps 0 n90 332 |cold pv|/|ref| 1.313 | spread K 4.8 Q 4.1 | fp4: m 9.70 lambda 1751 l_cold 511.2 cold share 0.2919 max tile 1.0000
+  top  7 s  194 h 19 qb  3 warp 2340 cos 0.808462 relL2 0.8647 | hot  114/ 996 merge | fp32: cold mass 0.2743 max tile 0.1960 max cold tile 0.0032 cold tiles > eps 0 n90 324 |cold pv|/|ref| 1.301 | spread K 4.8 Q 4.1 | fp4: m 10.43 lambda 973.1 l_cold 259.1 cold share 0.2663 max tile 1.0000
+  top  8 s  231 h 19 qb  3 warp 2347 cos 0.810622 relL2 0.8224 | hot  105/ 996 merge | fp32: cold mass 0.2972 max tile 0.1818 max cold tile 0.0042 cold tiles > eps 0 n90 322 |cold pv|/|ref| 1.337 | spread K 4.8 Q 4.1 | fp4: m 8.41 lambda 3688 l_cold 1049 cold share 0.2844 max tile 1.0000
+  top  9 s 1670 h 19 qb 26 warp 2617 cos 0.812396 relL2 0.7048 | hot  153/1019 merge | fp32: cold mass 0.2263 max tile 0.1995 max cold tile 0.0025 cold tiles > eps 0 n90 326 |cold pv|/|ref| 1.137 | spread K 4.8 Q 4.1 | fp4: m 8.86 lambda 3288 l_cold 727.1 cold share 0.2211 max tile 1.0000
+  top 10 s  911 h 19 qb 14 warp 2474 cos 0.812758 relL2 0.8371 | hot   99/1007 merge | fp32: cold mass 0.3052 max tile 0.1615 max cold tile 0.0028 cold tiles > eps 0 n90 327 |cold pv|/|ref| 1.244 | spread K 4.8 Q 4.1 | fp4: m 8.53 lambda 3598 l_cold 1082 cold share 0.3006 max tile 1.0000
+  top 11 s 1268 h 19 qb 19 warp 2541 cos 0.812766 relL2 0.5828 | hot  136/1012 merge | fp32: cold mass 0.3410 max tile 0.2315 max cold tile 0.0026 cold tiles > eps 0 n90 444 |cold pv|/|ref| 1.171 | spread K 4.8 Q 4.1 | fp4: m 7.53 lambda 2566 l_cold 987.8 cold share 0.3849 max tile 1.0000
+  top 12 s 1409 h 19 qb 22 warp 2568 cos 0.817821 relL2 0.5755 | hot  149/1015 merge | fp32: cold mass 0.3296 max tile 0.2286 max cold tile 0.0026 cold tiles > eps 0 n90 452 |cold pv|/|ref| 1.144 | spread K 4.8 Q 4.1 | fp4: m 7.56 lambda 2563 l_cold 952.3 cold share 0.3715 max tile 1.0000
+  top 13 s  335 h 19 qb  5 warp 2366 cos 0.819514 relL2 0.5731 | hot  102/ 998 merge | fp32: cold mass 0.3973 max tile 0.2154 max cold tile 0.0027 cold tiles > eps 0 n90 450 |cold pv|/|ref| 1.243 | spread K 4.8 Q 4.1 | fp4: m 6.51 lambda 4999 l_cold 2144 cold share 0.4289 max tile 1.0000
+  top 14 s   51 h 19 qb  0 warp 2313 cos 0.819656 relL2 0.8431 | hot  105/ 993 merge | fp32: cold mass 0.3163 max tile 0.1785 max cold tile 0.0041 cold tiles > eps 0 n90 338 |cold pv|/|ref| 1.226 | spread K 4.8 Q 4.1 | fp4: m 8.62 lambda 3195 l_cold 949.5 cold share 0.2972 max tile 1.0000
+  top 15 s 1800 h 19 qb 28 warp 2641 cos 0.820114 relL2 0.5727 | hot  151/1021 merge | fp32: cold mass 0.3234 max tile 0.2265 max cold tile 0.0021 cold tiles > eps 0 n90 448 |cold pv|/|ref| 1.180 | spread K 4.8 Q 4.1 | fp4: m 6.71 lambda 4611 l_cold 1688 cold share 0.3660 max tile 1.0000
+  top 16 s  345 h 19 qb  5 warp 2368 cos 0.821127 relL2 0.7683 | hot  149/ 998 merge | fp32: cold mass 0.2317 max tile 0.1794 max cold tile 0.0029 cold tiles > eps 0 n90 328 |cold pv|/|ref| 1.284 | spread K 4.8 Q 4.1 | fp4: m 9.05 lambda 2420 l_cold 564.5 cold share 0.2333 max tile 1.0000
+  top 17 s  845 h 19 qb 13 warp 2462 cos 0.821207 relL2 0.5713 | hot  126/1006 merge | fp32: cold mass 0.3628 max tile 0.2076 max cold tile 0.0024 cold tiles > eps 0 n90 449 |cold pv|/|ref| 1.146 | spread K 4.8 Q 4.1 | fp4: m 7.01 lambda 3659 l_cold 1416 cold share 0.3869 max tile 1.0000
+  top 18 s 1621 h 19 qb 25 warp 2608 cos 0.824526 relL2 0.5659 | hot  158/1018 merge | fp32: cold mass 0.3105 max tile 0.2463 max cold tile 0.0021 cold tiles > eps 0 n90 447 |cold pv|/|ref| 1.168 | spread K 4.8 Q 4.1 | fp4: m 6.52 lambda 5152 l_cold 1833 cold share 0.3558 max tile 1.0000
+  top 19 s 1048 h 19 qb 16 warp 2500 cos 0.825094 relL2 0.5653 | hot  143/1009 merge | fp32: cold mass 0.3257 max tile 0.2307 max cold tile 0.0022 cold tiles > eps 0 n90 438 |cold pv|/|ref| 1.182 | spread K 4.8 Q 4.1 | fp4: m 7.86 lambda 1942 l_cold 735.9 cold share 0.3789 max tile 1.0000
+  fallback study (pairs < 0.9: 124, < 0.99: 1296): | th 0.05: warps 100.0 %, <0.9 124, <0.99 1296 | th 0.10: warps 100.0 %, <0.9 124, <0.99 1296 | th 0.15: warps 100.0 %, <0.9 124, <0.99 1296 | th 0.20: warps 100.0 %, <0.9 124, <0.99 1296 | th 0.25: warps 100.0 %, <0.9 124, <0.99 1296 | th 0.30: warps 100.0 %, <0.9 124, <0.99 1296
+lc_122880_2  fallback study (pairs < 0.9: 13, < 0.99: 1224): | th 0.05: warps 100.0 %, <0.9 13, <0.99 1224 | th 0.10: warps 98.6 %, <0.9 13, <0.99 1122 | th 0.15: warps 90.8 %, <0.9 1, <0.99 513 | th 0.20: warps 83.6 %, <0.9 0, <0.99 201 | th 0.25: warps 74.4 %, <0.9 0, <0.99 108 | th 0.30: warps 56.8 %, <0.9 0, <0.99 69
+lc_122880_0  fallback study (pairs < 0.9: 0, < 0.99: 1612): | th 0.05: warps 100.0 %, <0.9 0, <0.99 1612 | th 0.10: warps 100.0 %, <0.9 0, <0.99 1612 | th 0.15: warps 100.0 %, <0.9 0, <0.99 1612 | th 0.20: warps 100.0 %, <0.9 0, <0.99 1612 | th 0.25: warps 100.0 %, <0.9 0, <0.99 1612 | th 0.30: warps 100.0 %, <0.9 0, <0.99 1612
+lc_65536_2  fallback study (pairs < 0.9: 0, < 0.99: 370): | th 0.05: warps 99.5 %, <0.9 0, <0.99 344 | th 0.10: warps 98.8 %, <0.9 0, <0.99 343 | th 0.15: warps 94.0 %, <0.9 0, <0.99 329 | th 0.20: warps 86.9 %, <0.9 0, <0.99 309 | th 0.25: warps 74.3 %, <0.9 0, <0.99 267 | th 0.30: warps 50.7 %, <0.9 0, <0.99 171
+lc_32768_0  fallback study (pairs < 0.9: 0, < 0.99: 503): | th 0.05: warps 100.0 %, <0.9 0, <0.99 503 | th 0.10: warps 100.0 %, <0.9 0, <0.99 503 | th 0.15: warps 100.0 %, <0.9 0, <0.99 503 | th 0.20: warps 100.0 %, <0.9 0, <0.99 503 | th 0.25: warps 100.0 %, <0.9 0, <0.99 503 | th 0.30: warps 99.7 %, <0.9 0, <0.99 502
+lc_32768_2  fallback study (pairs < 0.9: 0, < 0.99: 170): | th 0.05: warps 100.0 %, <0.9 0, <0.99 170 | th 0.10: warps 98.6 %, <0.9 0, <0.99 163 | th 0.15: warps 87.9 %, <0.9 0, <0.99 98 | th 0.20: warps 68.7 %, <0.9 0, <0.99 28 | th 0.25: warps 43.7 %, <0.9 0, <0.99 10 | th 0.30: warps 18.9 %, <0.9 0, <0.99 5
+```
+
+Error-source emulation (`APA_ERRSRC=1`, e_src builds), mean lines:
+
+```
+### lc_65536_0_errsrc4.log
+errsrc mean of top 20: kernel 0.809680 | P only 0.996408 V only 0.999817 QK only 0.820737 all 0.815728 | Q only 0.823032 K only 0.998618 | all with Q 2xFP4 0.998386, Q FP8 0.995449, Q 2xFP4 on 64 ch 0.998099
+### lc_122880_2_errsrc4.log
+errsrc mean of top 20: kernel 0.888434 | P only 0.998214 V only 0.999897 QK only 0.908953 all 0.890648 | Q only 0.907227 K only 0.999879 | all with Q 2xFP4 0.998000, Q FP8 0.993688, Q 2xFP4 on 64 ch 0.996503
+### lc_122880_1_errsrc3.log
+errsrc mean of top 20: kernel 0.985629 | P only 0.999797 V only 0.999982 QK only 0.984609 all 0.985236 | Q only 0.986258 K only 0.999669 | all with Q 2xFP4 0.999528, Q FP8 0.999248
+```
+
+Sweep 1 (q1 = e5776cc default, q2 = `-DAPA_Q2=1`), APA_FULL, verbatim summary:
+
+```
+lc_122880_0 q1 eps 0.005 rc 0: hot  10.2 % attn 4.321 ms | mean cos 0.998536 min 0.957087 cos<0.99 1612 cos<0.9 0 
+lc_122880_0 q2 eps 0.005 rc 0: hot  10.0 % attn 5.251 ms | mean cos 0.998963 min 0.982061 cos<0.99 1200 cos<0.9 0 
+lc_122880_0 q2 eps 0.01 rc 0: hot   4.5 % attn 4.855 ms | mean cos 0.998580 min 0.978775 cos<0.99 2003 cos<0.9 0 
+lc_122880_0 q2 eps 0.02 rc 0: hot   2.0 % attn 4.542 ms | mean cos 0.998316 min 0.976795 cos<0.99 2346 cos<0.9 0 
+lc_122880_0 q1 eps 1e9 rc 0: hot   0.0 % attn 3.407 ms | 
+lc_122880_0 q2 eps 1e9 rc 0: hot   0.0 % attn 4.452 ms | 
+lc_122880_1 q1 eps 0.005 rc 0: hot   9.5 % attn 4.657 ms | mean cos 0.999705 min 0.972723 cos<0.99 13 cos<0.9 0 
+lc_122880_1 q2 eps 0.005 rc 0: hot   9.3 % attn 5.715 ms | mean cos 0.999938 min 0.997207 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2 eps 0.01 rc 0: hot   5.2 % attn 5.036 ms | mean cos 0.999917 min 0.996695 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2 eps 0.02 rc 0: hot   2.8 % attn 4.736 ms | mean cos 0.999870 min 0.994303 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q1 eps 1e9 rc 0: hot   0.0 % attn 3.360 ms | 
+lc_122880_1 q2 eps 1e9 rc 0: hot   0.0 % attn 4.357 ms | 
+lc_122880_2 q1 eps 0.005 rc 0: hot   5.9 % attn 4.639 ms | mean cos 0.998352 min 0.847877 cos<0.99 1224 cos<0.9 13 
+lc_122880_2 q2 eps 0.005 rc 0: hot   5.9 % attn 5.815 ms | mean cos 0.999613 min 0.978109 cos<0.99 38 cos<0.9 0 
+lc_122880_2 q2 eps 0.01 rc 0: hot   3.2 % attn 5.161 ms | mean cos 0.999532 min 0.923066 cos<0.99 71 cos<0.9 0 
+lc_122880_2 q2 eps 0.02 rc 0: hot   1.6 % attn 4.965 ms | mean cos 0.999305 min 0.897855 cos<0.99 299 cos<0.9 1 
+lc_122880_2 q1 eps 1e9 rc 0: hot   0.0 % attn 3.451 ms | 
+lc_122880_2 q2 eps 1e9 rc 0: hot   0.0 % attn 4.282 ms | 
+lc_65536_0 q1 eps 0.005 rc 0: hot  19.2 % attn 2.968 ms | mean cos 0.997890 min 0.773144 cos<0.99 1296 cos<0.9 124 
+lc_65536_0 q2 eps 0.005 rc 0: hot  18.9 % attn 3.374 ms | mean cos 0.999179 min 0.984063 cos<0.99 112 cos<0.9 0 
+lc_65536_0 q2 eps 0.01 rc 0: hot   8.0 % attn 2.812 ms | mean cos 0.998585 min 0.977734 cos<0.99 1252 cos<0.9 0 
+lc_65536_0 q2 eps 0.02 rc 0: hot   3.2 % attn 2.549 ms | mean cos 0.998178 min 0.970104 cos<0.99 1970 cos<0.9 0 
+lc_65536_0 q1 eps 1e9 rc 0: hot   0.0 % attn 1.779 ms | 
+lc_65536_0 q2 eps 1e9 rc 0: hot   0.0 % attn 2.314 ms | 
+lc_65536_1 q1 eps 0.005 rc 0: hot  13.8 % attn 3.062 ms | mean cos 0.999766 min 0.985146 cos<0.99 6 cos<0.9 0 
+lc_65536_1 q2 eps 0.005 rc 0: hot  13.4 % attn 3.339 ms | mean cos 0.999949 min 0.997728 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2 eps 0.01 rc 0: hot   7.2 % attn 2.984 ms | mean cos 0.999931 min 0.996647 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2 eps 0.02 rc 0: hot   3.6 % attn 2.712 ms | mean cos 0.999890 min 0.991914 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q1 eps 1e9 rc 0: hot   0.0 % attn 1.848 ms | 
+lc_65536_1 q2 eps 1e9 rc 0: hot   0.0 % attn 2.370 ms | 
+lc_65536_2 q1 eps 0.005 rc 0: hot   9.5 % attn 3.015 ms | mean cos 0.999027 min 0.909434 cos<0.99 370 cos<0.9 0 
+lc_65536_2 q2 eps 0.005 rc 0: hot   8.8 % attn 3.504 ms | mean cos 0.999670 min 0.987316 cos<0.99 6 cos<0.9 0 
+lc_65536_2 q2 eps 0.01 rc 0: hot   4.6 % attn 2.981 ms | mean cos 0.999585 min 0.984999 cos<0.99 14 cos<0.9 0 
+lc_65536_2 q2 eps 0.02 rc 0: hot   2.3 % attn 2.709 ms | mean cos 0.999329 min 0.915157 cos<0.99 253 cos<0.9 0 
+lc_65536_2 q1 eps 1e9 rc 0: hot   0.0 % attn 1.781 ms | 
+lc_65536_2 q2 eps 1e9 rc 0: hot   0.0 % attn 2.289 ms | 
+lc_32768_0 q1 eps 0.005 rc 0: hot  39.3 % attn 2.361 ms | mean cos 0.999046 min 0.938131 cos<0.99 503 cos<0.9 0 
+lc_32768_0 q2 eps 0.005 rc 0: hot  38.5 % attn 2.563 ms | mean cos 0.999576 min 0.987716 cos<0.99 5 cos<0.9 0 
+lc_32768_0 q2 eps 0.01 rc 0: hot  16.8 % attn 1.690 ms | mean cos 0.998769 min 0.972814 cos<0.99 385 cos<0.9 0 
+lc_32768_0 q2 eps 0.02 rc 0: hot   6.8 % attn 1.392 ms | mean cos 0.998166 min 0.964771 cos<0.99 1519 cos<0.9 0 
+lc_32768_0 q1 eps 1e9 rc 0: hot   0.0 % attn 0.886 ms | 
+lc_32768_0 q2 eps 1e9 rc 0: hot   0.0 % attn 1.147 ms | 
+lc_32768_1 q1 eps 0.005 rc 0: hot  23.6 % attn 1.849 ms | mean cos 0.999837 min 0.990549 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2 eps 0.005 rc 0: hot  23.0 % attn 1.987 ms | mean cos 0.999958 min 0.997825 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2 eps 0.01 rc 0: hot  12.9 % attn 1.675 ms | mean cos 0.999937 min 0.997465 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2 eps 0.02 rc 0: hot   6.9 % attn 1.488 ms | mean cos 0.999894 min 0.993711 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q1 eps 1e9 rc 0: hot   0.0 % attn 0.884 ms | 
+lc_32768_1 q2 eps 1e9 rc 0: hot   0.0 % attn 1.145 ms | 
+lc_32768_2 q1 eps 0.005 rc 0: hot  17.8 % attn 1.851 ms | mean cos 0.999420 min 0.970655 cos<0.99 170 cos<0.9 0 
+lc_32768_2 q2 eps 0.005 rc 0: hot  17.1 % attn 2.051 ms | mean cos 0.999718 min 0.984155 cos<0.99 6 cos<0.9 0 
+lc_32768_2 q2 eps 0.01 rc 0: hot   9.2 % attn 1.771 ms | mean cos 0.999615 min 0.955492 cos<0.99 30 cos<0.9 0 
+lc_32768_2 q2 eps 0.02 rc 0: hot   4.7 % attn 1.519 ms | mean cos 0.999372 min 0.934257 cos<0.99 228 cos<0.9 0 
+lc_32768_2 q1 eps 1e9 rc 0: hot   0.0 % attn 0.882 ms | 
+lc_32768_2 q2 eps 1e9 rc 0: hot   0.0 % attn 1.139 ms | 
+ra2dump_59 q1 eps 0.005 rc 0: hot  64.2 % attn 0.169 ms | mean cos 0.999979 min 0.993380 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2 eps 0.005 rc 0: hot  61.3 % attn 0.173 ms | mean cos 0.999986 min 0.996741 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2 eps 0.01 rc 0: hot  47.9 % attn 0.161 ms | mean cos 0.999975 min 0.990799 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2 eps 0.02 rc 0: hot  35.0 % attn 0.135 ms | mean cos 0.999952 min 0.977157 cos<0.99 4 cos<0.9 0 
+ra2dump_59 q1 eps 1e9 rc 0: hot   0.0 % attn 0.050 ms | 
+ra2dump_59 q2 eps 1e9 rc 0: hot   0.0 % attn 0.063 ms | 
+ra2dump_78 q1 eps 0.005 rc 0: hot  62.2 % attn 0.154 ms | mean cos 0.999976 min 0.991309 cos<0.99 0 cos<0.9 0 
+ra2dump_78 q2 eps 0.005 rc 0: hot  60.2 % attn 0.156 ms | mean cos 0.999985 min 0.993466 cos<0.99 0 cos<0.9 0 
+ra2dump_78 q2 eps 0.01 rc 0: hot  48.5 % attn 0.152 ms | mean cos 0.999943 min 0.970790 cos<0.99 18 cos<0.9 0 
+ra2dump_78 q2 eps 0.02 rc 0: hot  37.4 % attn 0.142 ms | mean cos 0.999778 min 0.884217 cos<0.99 132 cos<0.9 3 
+ra2dump_78 q1 eps 1e9 rc 0: hot   0.0 % attn 0.093 ms | 
+ra2dump_78 q2 eps 1e9 rc 0: hot   0.0 % attn 0.063 ms | 
+ra2dump_87 q1 eps 0.005 rc 0: hot  42.3 % attn 0.297 ms | mean cos 0.999924 min 0.983843 cos<0.99 2 cos<0.9 0 
+ra2dump_87 q2 eps 0.005 rc 0: hot  38.9 % attn 0.317 ms | mean cos 0.999963 min 0.994868 cos<0.99 0 cos<0.9 0 
+ra2dump_87 q2 eps 0.01 rc 0: hot  20.6 % attn 0.268 ms | mean cos 0.999928 min 0.994324 cos<0.99 0 cos<0.9 0 
+ra2dump_87 q2 eps 0.02 rc 0: hot  11.1 % attn 0.211 ms | mean cos 0.999878 min 0.979012 cos<0.99 1 cos<0.9 0 
+ra2dump_87 q1 eps 1e9 rc 0: hot   0.0 % attn 0.118 ms | 
+ra2dump_87 q2 eps 1e9 rc 0: hot   0.0 % attn 0.145 ms | 
+DONE
+```
+
+Sweep 2 (q2m1 = `-DAPA_Q2=1`, q2m2 = `-DAPA_Q2=2`):
+
+```
+lc_122880_0 q1 eps 0.005 rc 0: hot  10.2 % attn 4.326 ms | mean cos 0.998536 min 0.957087 cos<0.99 1612 cos<0.9 0 
+lc_122880_0 q2m1 eps 0.01 rc 0: hot   4.5 % attn 4.740 ms | mean cos 0.998580 min 0.978775 cos<0.99 2003 cos<0.9 0 
+lc_122880_0 q2m2 eps 0.005 rc 0: hot  10.3 % attn 4.983 ms | mean cos 0.998743 min 0.963487 cos<0.99 1889 cos<0.9 0 
+lc_122880_0 q2m2 eps 0.01 rc 0: hot   4.6 % attn 4.500 ms | mean cos 0.998208 min 0.954739 cos<0.99 2853 cos<0.9 0 
+lc_122880_0 q2m2 eps 0.02 rc 0: hot   2.0 % attn 4.186 ms | mean cos 0.997809 min 0.951205 cos<0.99 3068 cos<0.9 0 
+lc_122880_0 q2m2 eps 1e9 rc 0: hot   0.0 % attn 3.953 ms | 
+lc_122880_1 q1 eps 0.005 rc 0: hot   9.5 % attn 4.421 ms | mean cos 0.999705 min 0.972723 cos<0.99 13 cos<0.9 0 
+lc_122880_1 q2m1 eps 0.01 rc 0: hot   5.2 % attn 4.961 ms | mean cos 0.999917 min 0.996695 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2m2 eps 0.005 rc 0: hot   9.3 % attn 5.069 ms | mean cos 0.999935 min 0.996712 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2m2 eps 0.01 rc 0: hot   5.2 % attn 4.624 ms | mean cos 0.999912 min 0.995967 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2m2 eps 0.02 rc 0: hot   2.8 % attn 4.361 ms | mean cos 0.999862 min 0.993441 cos<0.99 0 cos<0.9 0 
+lc_122880_1 q2m2 eps 1e9 rc 0: hot   0.0 % attn 3.961 ms | 
+lc_122880_2 q1 eps 0.005 rc 0: hot   5.9 % attn 4.602 ms | mean cos 0.998352 min 0.847877 cos<0.99 1224 cos<0.9 13 
+lc_122880_2 q2m1 eps 0.01 rc 0: hot   3.2 % attn 5.058 ms | mean cos 0.999532 min 0.923066 cos<0.99 71 cos<0.9 0 
+lc_122880_2 q2m2 eps 0.005 rc 0: hot   5.9 % attn 5.206 ms | mean cos 0.999577 min 0.977037 cos<0.99 74 cos<0.9 0 
+lc_122880_2 q2m2 eps 0.01 rc 0: hot   3.2 % attn 4.738 ms | mean cos 0.999490 min 0.974521 cos<0.99 103 cos<0.9 0 
+lc_122880_2 q2m2 eps 0.02 rc 0: hot   1.7 % attn 4.427 ms | mean cos 0.999310 min 0.858353 cos<0.99 227 cos<0.9 2 
+lc_122880_2 q2m2 eps 1e9 rc 0: hot   0.0 % attn 3.934 ms | 
+lc_65536_0 q1 eps 0.005 rc 0: hot  19.2 % attn 2.885 ms | mean cos 0.997890 min 0.773144 cos<0.99 1296 cos<0.9 124 
+lc_65536_0 q2m1 eps 0.01 rc 0: hot   8.0 % attn 2.735 ms | mean cos 0.998585 min 0.977734 cos<0.99 1252 cos<0.9 0 
+lc_65536_0 q2m2 eps 0.005 rc 0: hot  19.3 % attn 3.110 ms | mean cos 0.999127 min 0.977662 cos<0.99 76 cos<0.9 0 
+lc_65536_0 q2m2 eps 0.01 rc 0: hot   8.3 % attn 2.575 ms | mean cos 0.998462 min 0.939895 cos<0.99 902 cos<0.9 0 
+lc_65536_0 q2m2 eps 0.02 rc 0: hot   3.3 % attn 2.328 ms | mean cos 0.998011 min 0.949843 cos<0.99 1867 cos<0.9 0 
+lc_65536_0 q2m2 eps 1e9 rc 0: hot   0.0 % attn 2.105 ms | 
+lc_65536_1 q1 eps 0.005 rc 0: hot  13.8 % attn 2.981 ms | mean cos 0.999766 min 0.985146 cos<0.99 6 cos<0.9 0 
+lc_65536_1 q2m1 eps 0.01 rc 0: hot   7.2 % attn 2.842 ms | mean cos 0.999931 min 0.996647 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2m2 eps 0.005 rc 0: hot  13.4 % attn 3.130 ms | mean cos 0.999947 min 0.997799 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2m2 eps 0.01 rc 0: hot   7.2 % attn 2.664 ms | mean cos 0.999925 min 0.997228 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2m2 eps 0.02 rc 0: hot   3.6 % attn 2.431 ms | mean cos 0.999881 min 0.993593 cos<0.99 0 cos<0.9 0 
+lc_65536_1 q2m2 eps 1e9 rc 0: hot   0.0 % attn 2.098 ms | 
+lc_65536_2 q1 eps 0.005 rc 0: hot   9.5 % attn 2.868 ms | mean cos 0.999027 min 0.909434 cos<0.99 370 cos<0.9 0 
+lc_65536_2 q2m1 eps 0.01 rc 0: hot   4.6 % attn 2.954 ms | mean cos 0.999585 min 0.984999 cos<0.99 14 cos<0.9 0 
+lc_65536_2 q2m2 eps 0.005 rc 0: hot   8.9 % attn 3.164 ms | mean cos 0.999648 min 0.988146 cos<0.99 6 cos<0.9 0 
+lc_65536_2 q2m2 eps 0.01 rc 0: hot   4.6 % attn 2.766 ms | mean cos 0.999551 min 0.980282 cos<0.99 13 cos<0.9 0 
+lc_65536_2 q2m2 eps 0.02 rc 0: hot   2.3 % attn 2.502 ms | mean cos 0.999383 min 0.967713 cos<0.99 43 cos<0.9 0 
+lc_65536_2 q2m2 eps 1e9 rc 0: hot   0.0 % attn 2.092 ms | 
+lc_32768_0 q1 eps 0.005 rc 0: hot  39.3 % attn 2.364 ms | mean cos 0.999046 min 0.938131 cos<0.99 503 cos<0.9 0 
+lc_32768_0 q2m1 eps 0.01 rc 0: hot  16.8 % attn 1.674 ms | mean cos 0.998769 min 0.972814 cos<0.99 385 cos<0.9 0 
+lc_32768_0 q2m2 eps 0.005 rc 0: hot  39.3 % attn 2.519 ms | mean cos 0.999505 min 0.984118 cos<0.99 18 cos<0.9 0 
+lc_32768_0 q2m2 eps 0.01 rc 0: hot  17.3 % attn 1.670 ms | mean cos 0.998604 min 0.973355 cos<0.99 949 cos<0.9 0 
+lc_32768_0 q2m2 eps 0.02 rc 0: hot   7.0 % attn 1.329 ms | mean cos 0.997949 min 0.962147 cos<0.99 1992 cos<0.9 0 
+lc_32768_0 q2m2 eps 1e9 rc 0: hot   0.0 % attn 1.054 ms | 
+lc_32768_1 q1 eps 0.005 rc 0: hot  23.6 % attn 1.835 ms | mean cos 0.999837 min 0.990549 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2m1 eps 0.01 rc 0: hot  12.9 % attn 1.665 ms | mean cos 0.999937 min 0.997465 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2m2 eps 0.005 rc 0: hot  23.5 % attn 1.923 ms | mean cos 0.999956 min 0.997834 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2m2 eps 0.01 rc 0: hot  13.2 % attn 1.577 ms | mean cos 0.999932 min 0.996459 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2m2 eps 0.02 rc 0: hot   7.1 % attn 1.393 ms | mean cos 0.999887 min 0.995573 cos<0.99 0 cos<0.9 0 
+lc_32768_1 q2m2 eps 1e9 rc 0: hot   0.0 % attn 1.049 ms | 
+lc_32768_2 q1 eps 0.005 rc 0: hot  17.8 % attn 1.844 ms | mean cos 0.999420 min 0.970655 cos<0.99 170 cos<0.9 0 
+lc_32768_2 q2m1 eps 0.01 rc 0: hot   9.2 % attn 1.749 ms | mean cos 0.999615 min 0.955492 cos<0.99 30 cos<0.9 0 
+lc_32768_2 q2m2 eps 0.005 rc 0: hot  17.3 % attn 1.938 ms | mean cos 0.999708 min 0.984406 cos<0.99 11 cos<0.9 0 
+lc_32768_2 q2m2 eps 0.01 rc 0: hot   9.3 % attn 1.670 ms | mean cos 0.999609 min 0.980032 cos<0.99 19 cos<0.9 0 
+lc_32768_2 q2m2 eps 0.02 rc 0: hot   4.8 % attn 1.426 ms | mean cos 0.999387 min 0.918244 cos<0.99 179 cos<0.9 0 
+lc_32768_2 q2m2 eps 1e9 rc 0: hot   0.0 % attn 1.050 ms | 
+ra2dump_59 q1 eps 0.005 rc 0: hot  64.2 % attn 0.169 ms | mean cos 0.999979 min 0.993380 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2m1 eps 0.01 rc 0: hot  47.9 % attn 0.159 ms | mean cos 0.999975 min 0.990799 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2m2 eps 0.005 rc 0: hot  63.4 % attn 0.164 ms | mean cos 0.999987 min 0.997276 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2m2 eps 0.01 rc 0: hot  48.5 % attn 0.145 ms | mean cos 0.999973 min 0.992642 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2m2 eps 0.02 rc 0: hot  34.6 % attn 0.122 ms | mean cos 0.999948 min 0.992642 cos<0.99 0 cos<0.9 0 
+ra2dump_59 q2m2 eps 1e9 rc 0: hot   0.0 % attn 0.058 ms | 
+ra2dump_78 q1 eps 0.005 rc 0: hot  62.2 % attn 0.149 ms | mean cos 0.999976 min 0.991309 cos<0.99 0 cos<0.9 0 
+ra2dump_78 q2m1 eps 0.01 rc 0: hot  48.5 % attn 0.151 ms | mean cos 0.999943 min 0.970790 cos<0.99 18 cos<0.9 0 
+ra2dump_78 q2m2 eps 0.005 rc 0: hot  59.5 % attn 0.155 ms | mean cos 0.999983 min 0.983548 cos<0.99 2 cos<0.9 0 
+ra2dump_78 q2m2 eps 0.01 rc 0: hot  48.1 % attn 0.148 ms | mean cos 0.999937 min 0.967982 cos<0.99 21 cos<0.9 0 
+ra2dump_78 q2m2 eps 0.02 rc 0: hot  37.2 % attn 0.136 ms | mean cos 0.999761 min 0.872621 cos<0.99 145 cos<0.9 2 
+ra2dump_78 q2m2 eps 1e9 rc 0: hot   0.0 % attn 0.085 ms | 
+ra2dump_87 q1 eps 0.005 rc 0: hot  42.3 % attn 0.295 ms | mean cos 0.999924 min 0.983843 cos<0.99 2 cos<0.9 0 
+ra2dump_87 q2m1 eps 0.01 rc 0: hot  20.6 % attn 0.267 ms | mean cos 0.999928 min 0.994324 cos<0.99 0 cos<0.9 0 
+ra2dump_87 q2m2 eps 0.005 rc 0: hot  37.9 % attn 0.294 ms | mean cos 0.999957 min 0.996497 cos<0.99 0 cos<0.9 0 
+ra2dump_87 q2m2 eps 0.01 rc 0: hot  19.7 % attn 0.239 ms | mean cos 0.999913 min 0.989950 cos<0.99 1 cos<0.9 0 
+ra2dump_87 q2m2 eps 0.02 rc 0: hot  10.8 % attn 0.192 ms | mean cos 0.999858 min 0.972674 cos<0.99 4 cos<0.9 0 
+ra2dump_87 q2m2 eps 1e9 rc 0: hot   0.0 % attn 0.136 ms | 
+DONE
+```
+
+bench/test.sh with APA_Q2=2 default, REF=base: 117 checks ok, ALL OK. All-pairs and chunked lines:
+
+```
+full eps    5e-03: pairs 49152 pooled cos 0.999645 mean cos 0.998743 min 0.963487 | cos<0.99 1889 cos<0.9 0 cos<0 0 | re
+full eps    5e-03: pairs 49152 pooled cos 0.999961 mean cos 0.999935 min 0.996712 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999875 mean cos 0.999577 min 0.977037 | cos<0.99 74 cos<0.9 0 cos<0 0 | relL
+full eps    5e-03: pairs 49152 pooled cos 0.999852 mean cos 0.999505 min 0.984118 | cos<0.99 18 cos<0.9 0 cos<0 0 | relL
+full eps    5e-03: pairs 49152 pooled cos 0.999978 mean cos 0.999956 min 0.997834 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999924 mean cos 0.999708 min 0.984406 | cos<0.99 11 cos<0.9 0 cos<0 0 | relL
+full eps    5e-03: pairs 49152 pooled cos 0.999729 mean cos 0.999127 min 0.977662 | cos<0.99 76 cos<0.9 0 cos<0 0 | relL
+full eps    5e-03: pairs 49152 pooled cos 0.999969 mean cos 0.999947 min 0.997799 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999893 mean cos 0.999648 min 0.988146 | cos<0.99 6 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999993 mean cos 0.999987 min 0.997276 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999995 mean cos 0.999983 min 0.983548 | cos<0.99 2 cos<0.9 0 cos<0 0 | relL2
+full eps    5e-03: pairs 49152 pooled cos 0.999981 mean cos 0.999957 min 0.996497 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2
+  full full requant: pooled cos 0.999729 mean cos 0.999127 min 0.977662 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999729 mean cos 0.999106 min 0.982871 cos<0.9 0 cos<0 0
+chunks 32 x 2048 eps 5e-03: full requant 78.75 ms cos 0.999721 min 0.988074 | incremental 77.18 ms cos 0.999718 min 0.986201
+chunks incr vs requant: worst min cos 0.989199 (chunk 31), max cos<0.99 1, max cos<0.9 0, bitwise equal 18 of 32
+  full full requant: pooled cos 0.999875 mean cos 0.999577 min 0.977037 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999873 mean cos 0.999569 min 0.981605 cos<0.9 0 cos<0 0
+chunks 60 x 2048 eps 5e-03: full requant 204.16 ms cos 0.999878 min 0.990171 | incremental 196.11 ms cos 0.999877 min 0.988426
+chunks incr vs requant: worst min cos 0.941417 (chunk 9), max cos<0.99 17, max cos<0.9 0, bitwise equal 27 of 60
+```
+
+APA_Q2=0 build (test_q20) vs 0.4.0 kernel (t3_def), eps 0.005, O bitwise equal on lc_122880_2, lc_65536_0, ra2dump_87
+(run output).

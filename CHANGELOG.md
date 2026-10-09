@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Pass 1: Q as two E2M1 terms (`APA_Q2`, default 2): the residual of the first term, in the same row scale, on the
+  64 channels of largest |q| per kv head (Q and K channels permuted alike, frozen with the KvState stats); +8 OMMAs
+  per tile. Cause (AUDIT.md, Phase 6): FP4 rounding of Q, not K / P / V, decides the worst rows (host emulation,
+  top-20 pairs). All pairs, eps 0.005, 12 dumps: pairs < 0.9 137 -> 0, worst min cos 0.773144 -> 0.963487
+  (lc_65536_0 0.773144 -> 0.977662, lc_122880_2 0.847877 -> 0.977037); attention +5 to +15 % on the 9 long dumps,
+  pass 1 alone +13.5 to +19.0 % (`APA_Q2=1`, all channels: +24.1 to +30.7 %; two runs). `APA_Q2=0`: 0.4.0 bitwise.
+- Bench: `APA_ERRSRC=1` (host emulation per quantization error source on the top-20 pairs), fallback study in
+  `-DAPA_DBG` `APA_FULL` runs; `bench/test.sh` builds `APA_Q2=0 / 1` and checks legacy vs `REF` with `APA_Q2=0`.
+
 ## 0.4.0 (2026-10-08)
 
 - Bench: `APA_FULL=1` also scores the `APA_PAGED` and `APA_CHUNKS` outputs over all pairs (`  full <path>` lines).

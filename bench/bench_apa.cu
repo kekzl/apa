@@ -456,6 +456,171 @@ int main(int argc, char** argv) {
 #endif
         std::printf("\n");
       }
+      // APA_ERRSRC=1: error source of the top-20 pairs. Host emulation of one FP4 quantization at a time on the cold
+      // tiles (hot tiles exact, as pass 2): P (E2M1, power-of-two scale per 16 keys), V (E2M1 x UE4M3 per 16 tokens),
+      // QK (Q, mean-centred K in E2M1 x UE4M3 per 16 channels); cos vs FP32 per variant, mean over the 20 pairs.
+      if (std::getenv("APA_ERRSRC")) {
+        auto e2m1 = [](double x) {  // round to nearest E2M1 magnitude, sign kept, saturating at 6
+          static const double g[8] = {0, 0.5, 1, 1.5, 2, 3, 4, 6};
+          const double a = std::min(std::fabs(x), 6.0);
+          int best = 0;
+          for (int i = 1; i < 8; ++i) if (std::fabs(a - g[i]) < std::fabs(a - g[best])) best = i;
+          return x < 0 ? -g[best] : g[best];
+        };
+        auto e4m3 = [](double x) { return (double)__half2float(__half(__nv_cvt_fp8_to_halfraw(
+                                       __nv_cvt_float_to_fp8((float)x, __NV_SATFINITE, __NV_E4M3), __NV_E4M3))); };
+        auto blockq = [&](double* x, int n, double gscale) {  // in place: x / gscale per 16 in E2M1 x UE4M3
+          for (int b0 = 0; b0 < n; b0 += 16) {
+            double am = 0;
+            for (int i = 0; i < 16; ++i) am = std::max(am, std::fabs(x[b0 + i] / gscale));
+            const double sb = std::max(e4m3(am / 6), 1.0 / 512);
+            for (int i = 0; i < 16; ++i) x[b0 + i] = e2m1(x[b0 + i] / gscale / sb) * sb * gscale;
+          }
+        };
+        auto up2 = [](double x) { return std::exp2(std::ceil(std::log2(x))); };
+        std::vector<double> kmean((size_t)nkv * hd, 0.0), kam(nkv, 0.0), vam(nkv, 0.0);
+        for (int j = 0; j < kv; ++j)
+          for (int hh = 0; hh < nkv; ++hh)
+            for (int e = 0; e < hd; ++e) {
+              const double kk = __half2float(hk[((size_t)j * nkv + hh) * hd + e]);
+              kmean[(size_t)hh * hd + e] += kk / kv;
+              kam[hh] = std::max(kam[hh], std::fabs(kk));
+              vam[hh] = std::max(vam[hh], (double)std::fabs(__half2float(hv[((size_t)j * nkv + hh) * hd + e])));
+            }
+        double acc[10] = {};  // kernel, P, V, QK, all, Q only, K only, all with Q two-term FP4, all with Q FP8
+        for (int i = 0; i < 20; ++i) {
+          const int s = top[i].x, h = top[i].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
+          const int r = s * G + h % G, wi = (hkv * w.nqb + r / 192) * 12 + (r % 192) / 16;
+          const float* sc = sc20.data() + (size_t)i * kv;
+          double mk = 0, kg, vg;
+          for (int e = 0; e < hd; ++e) mk = std::max(mk, std::fabs(kmean[(size_t)hkv * hd + e]));
+          kg = up2(4 * (kam[hkv] + mk) / 2688), vg = up2(4 * vam[hkv] / 2688);
+          std::vector<double> q(hd), qq(hd);
+          double qam = 0;
+          for (int e = 0; e < hd; ++e) q[e] = __half2float(hq[((size_t)s * nh + h) * hd + e]), qam = std::max(qam, std::fabs(q[e]));
+          qq = q;
+          blockq(qq.data(), hd, std::max(qam, 1e-20) / 2688);
+          std::vector<double> q2(hd), q8(hd);  // two-term FP4 (q_q + (q - q_q)_q), FP8 E4M3 per element (row scale)
+          double ram = 0;
+          for (int e = 0; e < hd; ++e) q2[e] = q[e] - qq[e], ram = std::max(ram, std::fabs(q2[e]));
+          blockq(q2.data(), hd, std::max(ram, 1e-20) / 2688);
+          for (int e = 0; e < hd; ++e) q2[e] += qq[e], q8[e] = e4m3(q[e] / (std::max(qam, 1e-20) / 448)) * std::max(qam, 1e-20) / 448;
+          // residual on 64 of 128 channels only: the head's 64 channels of largest mean |q| over all its rows (fixed set)
+          std::vector<double> qh(hd);
+          {
+            std::vector<std::pair<double, int>> imp(hd);
+            for (int e = 0; e < hd; ++e) {
+              double sabs = 0;
+              for (int s2 = 0; s2 < n; ++s2) sabs += std::fabs(__half2float(hq[((size_t)s2 * nh + h) * hd + e]));
+              imp[e] = {-sabs, e};
+            }
+            std::sort(imp.begin(), imp.end());
+            qh = qq;
+            for (int k2 = 0; k2 < 64; ++k2) qh[imp[k2].second] = q2[imp[k2].second];
+          }
+          double shift = 0;
+          for (int e = 0; e < hd; ++e) shift += q[e] * kmean[(size_t)hkv * hd + e];
+          // exact P (ref scratch, frame mx) and P from FP4 scores in the same frame: exp(sq + shift*scale - s_exact)
+          std::vector<double> pe(nrow), pk(nrow), pkq_only(nrow), pkk_only(nrow), pk2(nrow), pk8(nrow), pkh(nrow);
+          for (int j = 0; j < nrow; ++j) {
+            pe[j] = sc[j];
+            std::vector<double> kc(hd);
+            for (int e = 0; e < hd; ++e) kc[e] = __half2float(hk[((size_t)j * nkv + hkv) * hd + e]) - kmean[(size_t)hkv * hd + e];
+            blockq(kc.data(), hd, kg);
+            double sq = 0, sx = 0, sqo = 0, sko = 0, s2 = 0, s8 = 0, sh2 = 0;
+            for (int e = 0; e < hd; ++e) {
+              const double kx = __half2float(hk[((size_t)j * nkv + hkv) * hd + e]), km = kmean[(size_t)hkv * hd + e];
+              sq += qq[e] * kc[e], sx += q[e] * kx, sqo += qq[e] * (kx - km), sko += q[e] * kc[e];
+              s2 += q2[e] * kc[e], s8 += q8[e] * kc[e], sh2 += qh[e] * kc[e];
+            }
+            pk[j] = sc[j] * std::exp((sq + shift - sx) * scale);
+            pkq_only[j] = sc[j] * std::exp((sqo + shift - sx) * scale);
+            pkk_only[j] = sc[j] * std::exp((sko + shift - sx) * scale);
+            pk2[j] = sc[j] * std::exp((s2 + shift - sx) * scale);
+            pk8[j] = sc[j] * std::exp((s8 + shift - sx) * scale);
+            pkh[j] = sc[j] * std::exp((sh2 + shift - sx) * scale);
+          }
+          auto pquant = [&](std::vector<double> p) {  // per 16 keys: 2^k >= max / 6, E2M1
+            for (int g0 = 0; g0 < nrow; g0 += 16) {
+              double gm = 0;
+              for (int j = g0; j < std::min(nrow, g0 + 16); ++j) gm = std::max(gm, p[j]);
+              if (gm <= 0) continue;
+              const double k2 = up2(gm / 6);
+              for (int j = g0; j < std::min(nrow, g0 + 16); ++j) p[j] = e2m1(p[j] / k2) * k2;
+            }
+            return p;
+          };
+          const std::vector<double> pq = pquant(pe), pkq = pquant(pk), pk2q = pquant(pk2), pk8q = pquant(pk8), pkhq = pquant(pkh);
+          // V per tile: channel e, 16-token groups in slot order (pass-1 Vt layout)
+          std::vector<double> vq((size_t)nrow * hd);
+          for (int t0 = 0; t0 < nrow; t0 += 64)
+            for (int e = 0; e < hd; ++e)
+              for (int g = 0; g < 4; ++g) {
+                double xb[16];
+                int tok[16];
+                for (int u = 0; u < 16; ++u) {
+                  tok[u] = t0 + apa::slot_token(g * 16 + u);
+                  xb[u] = tok[u] < nrow ? __half2float(hv[((size_t)tok[u] * nkv + hkv) * hd + e]) : 0.0;
+                }
+                blockq(xb, 16, vg);
+                for (int u = 0; u < 16; ++u) if (tok[u] < nrow) vq[(size_t)tok[u] * hd + e] = xb[u];
+              }
+          auto out = [&](const std::vector<double>& pc, bool quant_v) {  // cold tiles from pc / vq, hot exact
+            std::vector<double> o(hd, 0.0);
+            double l = 0;
+            for (int j = 0; j < nrow; ++j) {
+              const int t = j / 64;
+              const bool hot = (hm[wi * w.W + t / 32] >> (t % 32)) & 1u;
+              const double pj = hot ? pe[j] : pc[j];
+              l += pj;
+              for (int e = 0; e < hd; ++e)
+                o[e] += pj * ((!hot && quant_v) ? vq[(size_t)j * hd + e] : __half2float(hv[((size_t)j * nkv + hkv) * hd + e]));
+            }
+            double d = 0, x = 0, y = 0;
+            for (int e = 0; e < hd; ++e) {
+              const double a = rall[cs[i].second * hd + e], b = o[e] / l;
+              d += a * b, x += a * a, y += b * b;
+            }
+            return d / std::sqrt(x * y);
+          };
+          const double c[10] = {cs[i].first, out(pq, false), out(pe, true), out(pk, false), out(pkq, true),
+                                out(pkq_only, false), out(pkk_only, false), out(pk2q, true), out(pk8q, true),
+                                out(pkhq, true)};
+          for (int k = 0; k < 10; ++k) acc[k] += c[k] / 20;
+          std::printf("  errsrc %2d s %4d h %2d: kernel %.6f | P %.6f V %.6f QK %.6f all %.6f | Q only %.6f K only %.6f\n",
+                      i, s, h, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+        }
+        std::printf("errsrc mean of top 20: kernel %.6f | P only %.6f V only %.6f QK only %.6f all %.6f | Q only %.6f"
+                    " K only %.6f | all with Q 2xFP4 %.6f, Q FP8 %.6f, Q 2xFP4 on 64 ch %.6f\n", acc[0], acc[1], acc[2],
+                    acc[3], acc[4], acc[5], acc[6], acc[7], acc[8], acc[9]);
+      }
+#ifdef APA_DBG
+      // diffuse-row fallback study: warps whose largest row FP4 cold share l_cold / lambda exceeds th (all tiles
+      // would go to pass 2); share of such warps, pairs < 0.9 / < 0.99 inside them
+      {
+        std::vector<float> wmax((size_t)nkv * ((R + 15) / 16), 0.f);
+        for (int hk2 = 0; hk2 < nkv; ++hk2)
+          for (int r = 0; r < R; ++r) {
+            const float4 dg = hdbg[(size_t)hk2 * R + r];
+            float& m = wmax[(size_t)hk2 * ((R + 15) / 16) + r / 16];
+            m = std::max(m, dg.y > 0.f ? dg.z / dg.y : 0.f);
+          }
+        size_t b9 = 0, b99 = 0;
+        for (size_t i = 0; i < np; ++i) b9 += cs[i].first < 0.9, b99 += cs[i].first < 0.99;
+        std::printf("  fallback study (pairs < 0.9: %zu, < 0.99: %zu):", b9, b99);
+        for (float th : {0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f}) {
+          size_t fw = 0, f9 = 0, f99 = 0;
+          for (float m : wmax) fw += m > th;
+          for (size_t i = 0; i < np; ++i) {
+            const size_t pi = cs[i].second;
+            const int s = (int)(pi / nh), h = (int)(pi % nh), r = s * G + h % G;
+            if (wmax[(size_t)(h / G) * ((R + 15) / 16) + r / 16] > th) f9 += cs[i].first < 0.9, f99 += cs[i].first < 0.99;
+          }
+          std::printf(" | th %.2f: warps %.1f %%, <0.9 %zu, <0.99 %zu", th, 100.0 * fw / wmax.size(), f9, f99);
+        }
+        std::printf("\n");
+      }
+#endif
       CK(cudaFree(dtop));
       CK(cudaFree(dscr));
       CK(cudaFree(dout));

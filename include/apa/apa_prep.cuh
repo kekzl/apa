@@ -197,7 +197,8 @@ template <int D, typename Reader>
 __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const float* __restrict__ kmean_g,
                                                        const HeadScale* __restrict__ hs, uint8_t* __restrict__ KV,
                                                        int t0, int t_keep = 0, const int* redo = nullptr,
-                                                       int* ovf = nullptr) {
+                                                       int* ovf = nullptr,
+                                                       const uint8_t* __restrict__ perm = nullptr) {
   using C = Cfg<D>;
   __shared__ __half vt[BKV][D + 2];  // V / vg (|x| <= 2688 fits FP16)
   __shared__ float kmean[D];
@@ -209,6 +210,23 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
   uint8_t* blob = KV + ((size_t)bhk * dm.kvcap + tile) * C::TILE;
   float amx = 0.f;  // largest |x| of a 16-block (ovf: > P_SCALE saturates the UE4M3 scale)
 
+  constexpr int KT = APA_Q2 == 2 && D <= 128 ? BKV : 1;  // D 256: no room next to vt (perm unused there)
+  __shared__ __half kt[KT][D + 2];  // APA_Q2 2: raw K rows, read back in perm channel order
+  if (perm != nullptr && KT > 1) {
+    for (int p = tid; p < BKV * C::G16; p += 256) {
+      const int r = p / C::G16, g = p % C::G16, s = tile * BKV + r;
+      float x[16];
+      if (s < dm.Skv) {
+        rd.load16(false, b, s, hk, g * 16, dm, D, x);
+      } else {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) x[i] = 0.f;
+      }
+#pragma unroll
+      for (int i = 0; i < 16; ++i) kt[KT > 1 ? r : 0][g * 16 + i] = __float2half(x[i]);
+    }
+    __syncthreads();
+  }
   for (int p = tid; p < BKV * C::G16; p += 256) {
     const int r = p / C::G16, g = p % C::G16, s = tile * BKV + r;
     float x[16];
@@ -222,8 +240,12 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
     }
 #pragma unroll
     for (int i = 0; i < 16; ++i) vt[r][g * 16 + i] = __float2half(x[i] / vg);
-    // ---- K (token row r, swizzled 16 B chunk g>>1, half g&1)
-    if (s < dm.Skv) {
+    // ---- K (token row r, swizzled 16 B chunk g>>1, half g&1); channel g * 16 + i is K channel perm[...] (APA_Q2 2)
+    if (s < dm.Skv && perm != nullptr && KT > 1) {
+      const uint8_t* pg = perm + (size_t)bhk * D + g * 16;
+#pragma unroll
+      for (int i = 0; i < 16; ++i) x[i] = (__half2float(kt[KT > 1 ? r : 0][pg[i]]) - kmean[pg[i]]) / kg;
+    } else if (s < dm.Skv) {
       rd.load16(false, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
       for (int i = 0; i < 16; ++i) x[i] = (x[i] - kmean[g * 16 + i]) / kg;
@@ -283,12 +305,48 @@ __global__ void __launch_bounds__(32) kv_fingerprint_kernel(Reader rd, Dims dm, 
 }
 
 // ---------------------------------------------------------------- Q packing + quantization
+// APA_Q2 2, grid (Hkv, B), 1024 threads (1024 / D row groups): channel order of (b, kv head) for Q and K. The D / 2
+// channels of largest sum |q| (every 4th position, all G heads) come first (residual Q term = first k-step), the rest
+// after; both halves ascending. Fixed summation order: deterministic. redo: KvState gate (skip when 0).
+template <int D, typename T>
+__global__ void __launch_bounds__(1024) q_perm_kernel(const T* __restrict__ Q, Dims dm, uint8_t* __restrict__ perm,
+                                                     const int* redo = nullptr) {
+  if (redo != nullptr && *redo == 0) return;
+  constexpr int NG = 1024 / D;
+  __shared__ float part[NG][D];
+  __shared__ int ina[D];
+  const int b = blockIdx.y, hk = blockIdx.x, bhk = b * dm.Hkv + hk, c = threadIdx.x % D, grp = threadIdx.x / D;
+  const int st = dm.Sq >= 64 ? 4 : 1, n = (dm.Sq + st - 1) / st * dm.G;
+  float sum = 0.f;
+#pragma unroll 8
+  for (int i = grp; i < n; i += NG) {
+    const int s = i / dm.G * st, g = i % dm.G;
+    sum += fabsf(to_f(Q[(((size_t)b * dm.Sq + s) * dm.H + hk * dm.G + g) * D + c]));
+  }
+  part[grp][c] = sum;
+  __syncthreads();
+  if (grp != 0) return;
+  float imp = 0.f;
+#pragma unroll
+  for (int k = 0; k < NG; ++k) imp += part[k][c];
+  part[0][c] = imp;
+  asm volatile("bar.sync 1, %0;" ::"r"(D) : "memory");
+  int rank = 0;
+  for (int c2 = 0; c2 < D; ++c2) rank += part[0][c2] > imp || (part[0][c2] == imp && c2 < c);
+  ina[c] = rank < D / 2;
+  asm volatile("bar.sync 1, %0;" ::"r"(D) : "memory");
+  int pos = ina[c] ? 0 : D / 2;
+  for (int c2 = 0; c2 < c; ++c2) pos += ina[c2] == ina[c];
+  perm[(size_t)bhk * D + pos] = (uint8_t)c;
+}
+
 // grid (ceil(R/64), Hkv, B), 256 threads. Q [B][Sq][H][D] -> packed rows per (b, kv head):
 // Qq [bhk][R][D/2], Qs [bhk][R][D/16], Qr [bhk][R]; qmul = softmax scale * log2(e).
 template <int D, typename T>
 __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, Dims dm, float qmul,
                                                       uint8_t* __restrict__ Qq, uint8_t* __restrict__ Qs,
-                                                      float* __restrict__ Qr) {
+                                                      float* __restrict__ Qr,
+                                                      const uint8_t* __restrict__ perm = nullptr) {
   constexpr int G16 = D / 16;
   const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tid = threadIdx.x;
   for (int p = tid; p < BKV * G16; p += 256) {  // uniform trip count: shuffles below stay warp-complete
@@ -296,15 +354,22 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
     const bool ok = r < dm.R;
     const int rr = ok ? r : dm.R - 1;
     const int s = rr / dm.G, h = hk * dm.G + rr % dm.G;
-    const T* src = Q + (((size_t)b * dm.Sq + s) * dm.H + h) * D + g * 16;
-    const uint4 u0 = *reinterpret_cast<const uint4*>(src), u1 = *reinterpret_cast<const uint4*>(src + 8);
-    const T* e0 = reinterpret_cast<const T*>(&u0);
-    const T* e1 = reinterpret_cast<const T*>(&u1);
+    const T* qrow = Q + (((size_t)b * dm.Sq + s) * dm.H + h) * D;
     float x[16], am = 0.f;
+    if (perm != nullptr) {  // channel g * 16 + i = Q channel perm[...] (APA_Q2 2)
+      const uint8_t* pg = perm + (size_t)bhk * D + g * 16;
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-      x[i] = to_f(e0[i]) * qmul;
-      x[8 + i] = to_f(e1[i]) * qmul;
+      for (int i = 0; i < 16; ++i) x[i] = to_f(qrow[pg[i]]) * qmul;
+    } else {
+      const uint4 u0 = *reinterpret_cast<const uint4*>(qrow + g * 16);
+      const uint4 u1 = *reinterpret_cast<const uint4*>(qrow + g * 16 + 8);
+      const T* e0 = reinterpret_cast<const T*>(&u0);
+      const T* e1 = reinterpret_cast<const T*>(&u1);
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        x[i] = to_f(e0[i]) * qmul;
+        x[8 + i] = to_f(e1[i]) * qmul;
+      }
     }
 #pragma unroll
     for (int i = 0; i < 16; ++i) am = fmaxf(am, fabsf(x[i]));
@@ -315,11 +380,24 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
     for (int i = 0; i < 16; ++i) x[i] /= qr;
     uint2 w;
     const uint8_t sb = quant16(x, w);
+#if APA_Q2
+    float xr[16];  // residual in the same row scale; stored after the first term
+    dequant16(w, sb, xr);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) xr[i] = x[i] - xr[i];
+    uint2 w2;
+    const uint8_t sb2 = quant16(xr, w2);
+#endif
     if (!ok) continue;
     const size_t row = (size_t)bhk * dm.R + r;
     if (g == 0) Qr[row] = qr;
     *reinterpret_cast<uint2*>(Qq + row * (D / 2) + g * 8) = w;
     Qs[row * (D / 16) + g] = sb;
+#if APA_Q2
+    const size_t rows = (size_t)dm.B * dm.Hkv * dm.R;
+    *reinterpret_cast<uint2*>(Qq + (rows + row) * (D / 2) + g * 8) = w2;
+    Qs[(rows + row) * (D / 16) + g] = sb2;
+#endif
   }
 }
 
