@@ -479,8 +479,8 @@ int main(int argc, char** argv) {
           }
         };
         auto up2 = [](double x) { return std::exp2(std::ceil(std::log2(x))); };
-        // per kv head: K mean, maxima, centred rms per channel; |q| sums as q_perm_kernel (every 4th position, G heads)
-        std::vector<double> kmean((size_t)nkv * hd, 0.0), krms((size_t)nkv * hd, 0.0), qimp((size_t)nkv * hd, 0.0);
+        // per kv head: K mean and maxima
+        std::vector<double> kmean((size_t)nkv * hd, 0.0);
         std::vector<double> kam(nkv, 0.0), vam(nkv, 0.0);
         for (int j = 0; j < kv; ++j)
           for (int hh = 0; hh < nkv; ++hh)
@@ -490,34 +490,11 @@ int main(int argc, char** argv) {
               kam[hh] = std::max(kam[hh], std::fabs(kk));
               vam[hh] = std::max(vam[hh], (double)std::fabs(__half2float(hv[((size_t)j * nkv + hh) * hd + e])));
             }
-        for (int j = 0; j < kv; ++j)
-          for (int hh = 0; hh < nkv; ++hh)
-            for (int e = 0; e < hd; ++e) {
-              const double d = __half2float(hk[((size_t)j * nkv + hh) * hd + e]) - kmean[(size_t)hh * hd + e];
-              krms[(size_t)hh * hd + e] += d * d / kv;
-            }
-        for (int s2 = 0; s2 < n; s2 += (n >= 64 ? 4 : 1))
-          for (int hh = 0; hh < nh; ++hh)
-            for (int e = 0; e < hd; ++e) qimp[(size_t)(hh / G) * hd + e] += std::fabs(__half2float(hq[((size_t)s2 * nh + hh) * hd + e]));
-        auto order = [&](int hkv, bool kweight) {  // top 64 first (ties: lower channel), both halves ascending
-          std::vector<double> im(hd);
-          for (int e = 0; e < hd; ++e) im[e] = (float)qimp[(size_t)hkv * hd + e] * (kweight ? std::sqrt(krms[(size_t)hkv * hd + e]) : 1.0);
-          std::vector<int> top(hd, 0), p;
-          for (int e = 0; e < hd; ++e) {
-            int r = 0;
-            for (int e2 = 0; e2 < hd; ++e2) r += im[e2] > im[e] || (im[e2] == im[e] && e2 < e);
-            top[e] = r < hd / 2;
-          }
-          for (int e = 0; e < hd; ++e) if (top[e]) p.push_back(e);
-          for (int e = 0; e < hd; ++e) if (!top[e]) p.push_back(e);
-          return p;
-        };
         std::vector<int> ident(hd);
         for (int e = 0; e < hd; ++e) ident[e] = e;
-        constexpr int NV = 12;
-        const char* names[NV] = {"kernel", "1 term", "2 terms 128 ch", "2 terms 64 ch |q|", "2 terms 64 ch |q|*rms(k)",
-                                 "64 |q|, P exact", "64 |q|, K exact", "64 |q|, V exact", "64 |q|, Q exact",
-                                 "64 |q|, P fine scale", "64 |q|*rms(k), P fine scale", "128 ch, P fine scale"};
+        constexpr int NV = 8;  // emulated kernel: Q two terms, UE4M3 P scales; then one change at a time
+        const char* names[NV] = {"kernel", "emulated", "Q one term", "P power-of-two scale", "P exact", "K exact",
+                                 "V exact", "Q exact"};
         double acc[NV] = {};
         for (int i = 0; i < 20; ++i) {
           const int s = top[i].x, h = top[i].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
@@ -612,21 +589,15 @@ int main(int argc, char** argv) {
             }
             return d / std::sqrt(x * y);
           };
-          const std::vector<int> pa = order(hkv, false), pb = order(hkv, true);
-          const std::vector<double> p_a = pscores(pa, 64, true, true), p_b = pscores(pb, 64, true, true);
-          const std::vector<double> p_all = pscores(ident, hd, true, true);
+          const std::vector<double> p2 = pscores(ident, hd, true, true);
           const double c[NV] = {cs[i].first,
-                                out(pquant(pscores(ident, 0, true, true)), true),
-                                out(pquant(p_all), true),
-                                out(pquant(p_a), true),
-                                out(pquant(p_b), true),
-                                out(p_a, true),
-                                out(pquant(pscores(pa, 64, true, false)), true),
-                                out(pquant(p_a), false),
-                                out(pquant(pscores(pa, 64, false, true)), true),
-                                out(pquant(p_a, true), true),
-                                out(pquant(p_b, true), true),
-                                out(pquant(p_all, true), true)};
+                                out(pquant(p2, true), true),
+                                out(pquant(pscores(ident, 0, true, true), true), true),
+                                out(pquant(p2), true),
+                                out(p2, true),
+                                out(pquant(pscores(ident, hd, true, false), true), true),
+                                out(pquant(p2, true), false),
+                                out(pquant(pscores(ident, hd, false, true), true), true)};
           for (int k = 0; k < NV; ++k) acc[k] += c[k] / 20;
           std::printf("  errsrc %2d s %4d h %2d:", i, s, h);
           for (int k = 0; k < NV; ++k) std::printf(" %.6f", c[k]);
@@ -636,33 +607,6 @@ int main(int argc, char** argv) {
         for (int k = 0; k < NV; ++k) std::printf(" | %s %.6f", names[k], acc[k]);
         std::printf("\n");
       }
-#ifdef APA_DBG
-      // diffuse-row fallback study: warps whose largest row FP4 cold share l_cold / lambda exceeds th (all tiles
-      // would go to pass 2); share of such warps, pairs < 0.9 / < 0.99 inside them
-      {
-        std::vector<float> wmax((size_t)nkv * ((R + 15) / 16), 0.f);
-        for (int hk2 = 0; hk2 < nkv; ++hk2)
-          for (int r = 0; r < R; ++r) {
-            const float4 dg = hdbg[(size_t)hk2 * R + r];
-            float& m = wmax[(size_t)hk2 * ((R + 15) / 16) + r / 16];
-            m = std::max(m, dg.y > 0.f ? dg.z / dg.y : 0.f);
-          }
-        size_t b9 = 0, b99 = 0;
-        for (size_t i = 0; i < np; ++i) b9 += cs[i].first < 0.9, b99 += cs[i].first < 0.99;
-        std::printf("  fallback study (pairs < 0.9: %zu, < 0.99: %zu):", b9, b99);
-        for (float th : {0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f}) {
-          size_t fw = 0, f9 = 0, f99 = 0;
-          for (float m : wmax) fw += m > th;
-          for (size_t i = 0; i < np; ++i) {
-            const size_t pi = cs[i].second;
-            const int s = (int)(pi / nh), h = (int)(pi % nh), r = s * G + h % G;
-            if (wmax[(size_t)(h / G) * ((R + 15) / 16) + r / 16] > th) f9 += cs[i].first < 0.9, f99 += cs[i].first < 0.99;
-          }
-          std::printf(" | th %.2f: warps %.1f %%, <0.9 %zu, <0.99 %zu", th, 100.0 * fw / wmax.size(), f9, f99);
-        }
-        std::printf("\n");
-      }
-#endif
       CK(cudaFree(dtop));
       CK(cudaFree(dscr));
       CK(cudaFree(dout));

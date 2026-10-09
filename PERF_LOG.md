@@ -2361,3 +2361,114 @@ full eps    5e-03: pairs 49152 pooled cos 0.999985 mean cos 0.999969 min 0.99825
   full incremental: pooled cos 0.999888 mean cos 0.999788 min 0.990915 cos<0.9 0 cos<0 0
 ```
 First run (test_q3): 96 ok, 21 FAIL (legacy flags without APA_PFINE=0: 12; forced redo vs exact stats: 9).
+
+## 2026-10-09 Phase 8: one scheme (main 0afa277 vs two-term Q on all channels)
+
+Builds: v_cur = 0afa277 defaults, v_all = second Q term on all 128 channels + UE4M3 P (now the only scheme).
+APA_FULL=1, eps 0.005, same run (scratchpad vfin/sweep.txt):
+
+```
+lc_122880_0 v_cur eps 0.005 rc 0: hot  10.4 % attn 5.216 ms prep 0.505 ms | mean cos 0.998859 min 0.970867 cos<0.99 1559 cos<0.9 0 
+lc_122880_0 v_all eps 0.005 rc 0: hot  10.1 % attn 5.394 ms prep 0.492 ms | mean cos 0.999022 min 0.982774 cos<0.99 1115 cos<0.9 0 
+lc_122880_1 v_cur eps 0.005 rc 0: hot   9.4 % attn 5.349 ms prep 0.504 ms | mean cos 0.999951 min 0.996997 cos<0.99 0 cos<0.9 0 
+lc_122880_1 v_all eps 0.005 rc 0: hot   9.3 % attn 5.563 ms prep 0.493 ms | mean cos 0.999955 min 0.997516 cos<0.99 0 cos<0.9 0 
+lc_122880_2 v_cur eps 0.005 rc 0: hot   6.0 % attn 5.494 ms prep 0.505 ms | mean cos 0.999784 min 0.981924 cos<0.99 4 cos<0.9 0 
+lc_122880_2 v_all eps 0.005 rc 0: hot   5.9 % attn 5.708 ms prep 0.491 ms | mean cos 0.999833 min 0.980723 cos<0.99 4 cos<0.9 0 
+lc_65536_0 v_cur eps 0.005 rc 0: hot  19.3 % attn 3.272 ms prep 0.301 ms | mean cos 0.999228 min 0.981789 cos<0.99 73 cos<0.9 0 
+lc_65536_0 v_all eps 0.005 rc 0: hot  18.9 % attn 3.373 ms prep 0.296 ms | mean cos 0.999279 min 0.985485 cos<0.99 42 cos<0.9 0 
+lc_65536_1 v_cur eps 0.005 rc 0: hot  13.6 % attn 3.261 ms prep 0.301 ms | mean cos 0.999961 min 0.997992 cos<0.99 0 cos<0.9 0 
+lc_65536_1 v_all eps 0.005 rc 0: hot  13.5 % attn 3.352 ms prep 0.291 ms | mean cos 0.999965 min 0.997955 cos<0.99 0 cos<0.9 0 
+lc_65536_2 v_cur eps 0.005 rc 0: hot   9.1 % attn 3.292 ms prep 0.299 ms | mean cos 0.999845 min 0.991876 cos<0.99 0 cos<0.9 0 
+lc_65536_2 v_all eps 0.005 rc 0: hot   8.9 % attn 3.446 ms prep 0.293 ms | mean cos 0.999870 min 0.990073 cos<0.99 0 cos<0.9 0 
+lc_32768_0 v_cur eps 0.005 rc 0: hot  39.6 % attn 2.604 ms prep 0.181 ms | mean cos 0.999622 min 0.987702 cos<0.99 2 cos<0.9 0 
+lc_32768_0 v_all eps 0.005 rc 0: hot  38.7 % attn 2.594 ms prep 0.166 ms | mean cos 0.999660 min 0.990098 cos<0.99 0 cos<0.9 0 
+lc_32768_1 v_cur eps 0.005 rc 0: hot  23.4 % attn 1.961 ms prep 0.184 ms | mean cos 0.999969 min 0.998347 cos<0.99 0 cos<0.9 0 
+lc_32768_1 v_all eps 0.005 rc 0: hot  23.1 % attn 2.033 ms prep 0.162 ms | mean cos 0.999972 min 0.998213 cos<0.99 0 cos<0.9 0 
+lc_32768_2 v_cur eps 0.005 rc 0: hot  17.2 % attn 2.001 ms prep 0.182 ms | mean cos 0.999871 min 0.993729 cos<0.99 0 cos<0.9 0 
+lc_32768_2 v_all eps 0.005 rc 0: hot  17.1 % attn 2.057 ms prep 0.162 ms | mean cos 0.999892 min 0.993297 cos<0.99 0 cos<0.9 0 
+ra2dump_59 v_cur eps 0.005 rc 0: hot  62.8 % attn 0.165 ms prep 0.065 ms | mean cos 0.999990 min 0.998648 cos<0.99 0 cos<0.9 0 
+ra2dump_59 v_all eps 0.005 rc 0: hot  61.2 % attn 0.175 ms prep 0.058 ms | mean cos 0.999990 min 0.996188 cos<0.99 0 cos<0.9 0 
+ra2dump_78 v_cur eps 0.005 rc 0: hot  60.1 % attn 0.154 ms prep 0.060 ms | mean cos 0.999985 min 0.987324 cos<0.99 2 cos<0.9 0 
+ra2dump_78 v_all eps 0.005 rc 0: hot  60.2 % attn 0.157 ms prep 0.048 ms | mean cos 0.999988 min 0.988453 cos<0.99 2 cos<0.9 0 
+ra2dump_87 v_cur eps 0.005 rc 0: hot  36.0 % attn 0.296 ms prep 0.061 ms | mean cos 0.999969 min 0.998256 cos<0.99 0 cos<0.9 0 
+ra2dump_87 v_all eps 0.005 rc 0: hot  38.9 % attn 0.321 ms prep 0.044 ms | mean cos 0.999975 min 0.997270 cos<0.99 0 cos<0.9 0 
+```
+
+bench/test.sh after the refactor (`OUT=build/test_fin REF=v_all`):
+
+```
+ok lines: 115
+ok   lc_122880_0 default = v_all
+ok   lc_122880_1 default = v_all
+ok   lc_122880_2 default = v_all
+ok   lc_32768_0 default = v_all
+ok   lc_32768_1 default = v_all
+ok   lc_32768_2 default = v_all
+ok   lc_65536_0 default = v_all
+ok   lc_65536_1 default = v_all
+ok   lc_65536_2 default = v_all
+ok   ra2dump_59 default = v_all
+ok   ra2dump_78 default = v_all
+ok   ra2dump_87 default = v_all
+ALL OK
+exit 0
+```
+
+README table and KvState, test_fin logs:
+
+```
+### lc_122880_0
+apa eps    5e-03: cos 0.999679 min 0.985610  hot  10.1 % p2load  15.7 %  attn 5.381 ms (pass2 1.682) 569.9 TOPS  (prep 0.493 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999680 mean cos 0.999022 min 0.982774 | cos<0.99 1115 cos<0.9 0 cos<0 0 | relL2 mean 0.03484 p50 0.02436 p99 0.16303 p999 0.18286 max 0.19870
+  full full requant: pooled cos 0.999680 mean cos 0.999022 min 0.982774 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999676 mean cos 0.999049 min 0.983463 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.996147 (chunk 24), max cos<0.99 0, max cos<0.9 0, bitwise equal 27 of 60
+### lc_122880_1
+apa eps    5e-03: cos 0.999969 min 0.998290  hot   9.3 % p2load  29.2 %  attn 5.616 ms (pass2 2.009) 546.0 TOPS  (prep 0.489 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999969 mean cos 0.999955 min 0.997516 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00898 p50 0.00793 p99 0.03069 p999 0.05374 max 0.08090
+  full full requant: pooled cos 0.999969 mean cos 0.999955 min 0.997516 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999969 mean cos 0.999955 min 0.997491 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.996424 (chunk 48), max cos<0.99 0, max cos<0.9 0, bitwise equal 27 of 60
+### lc_122880_2
+apa eps    5e-03: cos 0.999903 min 0.997544  hot   5.9 % p2load  17.7 %  attn 5.712 ms (pass2 1.809) 536.9 TOPS  (prep 0.488 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999898 mean cos 0.999833 min 0.980723 | cos<0.99 4 cos<0.9 0 cos<0 0 | relL2 mean 0.01698 p50 0.01403 p99 0.06234 p999 0.10228 max 0.31095
+  full full requant: pooled cos 0.999898 mean cos 0.999833 min 0.980723 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999894 mean cos 0.999806 min 0.988101 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.928123 (chunk 9), max cos<0.99 19, max cos<0.9 0, bitwise equal 27 of 60
+### lc_65536_0
+apa eps    5e-03: cos 0.999769 min 0.990156  hot  18.9 % p2load  29.7 %  attn 3.384 ms (pass2 1.711) 479.8 TOPS  (prep 0.292 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999770 mean cos 0.999279 min 0.985485 | cos<0.99 42 cos<0.9 0 cos<0 0 | relL2 mean 0.03164 p50 0.02470 p99 0.12445 p999 0.14469 max 0.17777
+  full full requant: pooled cos 0.999770 mean cos 0.999279 min 0.985485 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999746 mean cos 0.999104 min 0.982827 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.993879 (chunk 31), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32
+### lc_65536_1
+apa eps    5e-03: cos 0.999975 min 0.998758  hot  13.5 % p2load  37.4 %  attn 3.345 ms (pass2 1.515) 485.4 TOPS  (prep 0.292 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999979 mean cos 0.999965 min 0.997955 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00752 p50 0.00642 p99 0.02793 p999 0.05573 max 0.08269
+  full full requant: pooled cos 0.999979 mean cos 0.999965 min 0.997955 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999978 mean cos 0.999965 min 0.997969 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.997944 (chunk 13), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32
+### lc_65536_2
+apa eps    5e-03: cos 0.999914 min 0.998874  hot   8.9 % p2load  23.0 %  attn 3.474 ms (pass2 1.353) 467.4 TOPS  (prep 0.288 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999917 mean cos 0.999870 min 0.990073 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01462 p50 0.01263 p99 0.04832 p999 0.07460 max 0.15120
+  full full requant: pooled cos 0.999917 mean cos 0.999870 min 0.990073 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999917 mean cos 0.999864 min 0.993234 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.966399 (chunk 23), max cos<0.99 5, max cos<0.9 0, bitwise equal 18 of 32
+### lc_32768_0
+apa eps    5e-03: cos 0.999869 min 0.993853  hot  38.7 % p2load  57.9 %  attn 2.600 ms (pass2 1.652) 307.3 TOPS  (prep 0.217 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999877 mean cos 0.999660 min 0.990098 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.02275 p50 0.01812 p99 0.07957 p999 0.10710 max 0.14322
+  full full requant: pooled cos 0.999877 mean cos 0.999660 min 0.990098 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999867 mean cos 0.999620 min 0.989903 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.999208 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+### lc_32768_1
+apa eps    5e-03: cos 0.999986 min 0.999536  hot  23.1 % p2load  59.5 %  attn 2.035 ms (pass2 1.272) 392.6 TOPS  (prep 0.158 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999985 mean cos 0.999972 min 0.998213 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00667 p50 0.00558 p99 0.02579 p999 0.04478 max 0.09174
+  full full requant: pooled cos 0.999985 mean cos 0.999972 min 0.998213 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999985 mean cos 0.999972 min 0.998210 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.998934 (chunk 13), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+### lc_32768_2
+apa eps    5e-03: cos 0.999946 min 0.996841  hot  17.1 % p2load  39.6 %  attn 2.071 ms (pass2 1.104) 385.8 TOPS  (prep 0.161 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999942 mean cos 0.999892 min 0.993297 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01362 p50 0.01121 p99 0.04697 p999 0.06928 max 0.13982
+  full full requant: pooled cos 0.999942 mean cos 0.999892 min 0.993297 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999946 mean cos 0.999896 min 0.992841 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.992645 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+```

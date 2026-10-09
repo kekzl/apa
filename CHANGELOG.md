@@ -1,24 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-10-09)
 
-- Pass 1: Q as two E2M1 terms (`APA_Q2`, default 2): the residual of the first term, in the same row scale, on the
-  64 channels of largest |q| per kv head (Q and K channels permuted alike, frozen with the KvState stats); +8 OMMAs
-  per tile. Cause (AUDIT.md, Phase 6): FP4 rounding of Q, not K / P / V, decides the worst rows (host emulation,
-  top-20 pairs). All pairs, eps 0.005, 12 dumps: pairs < 0.9 137 -> 0, worst min cos 0.773144 -> 0.963487
-  (lc_65536_0 0.773144 -> 0.977662, lc_122880_2 0.847877 -> 0.977037); attention +5 to +15 % on the 9 long dumps,
-  pass 1 alone +13.5 to +19.0 % (`APA_Q2=1`, all channels: +24.1 to +30.7 %; two runs).
-  `APA_Q2=0 APA_PFINE=0`: 0.4.0 bitwise.
-- Pass 1: P scale per 16 keys rounded up to UE4M3 instead of a power of two (`APA_PFINE`, default 1): the group
-  maximum lands near E2M1 6 instead of anywhere in (3, 6]. After Q, P is the largest error source (host emulation,
-  top-20 Q2 pairs, P exact: lc_122880_2 0.987731 -> 0.998622). Pass 1 alone +5.1 to +5.2 %.
-- Q2 channel order ranks sum |q| x centred K rms (`APA_QPERM_K`, default 1; stats also sum K^2 per chunk), sampled
-  every 16th position (q_perm_kernel 34.3 -> 12.4 us). Both vs 5da6af7, eps 0.005, all pairs, same run: attention
-  +2.7 to +4.1 % (6 dumps). All three, 12 dumps, eps 0.005, all pairs: pairs < 0.9 137 -> 0, < 0.99 5196 -> 1640,
-  worst min cos 0.773144 -> 0.970867; attention +7.0 to +20.2 % vs 0.4.0 (two runs). KvState last chunk, lc_122880_2:
-  0.821417 -> 0.990915. Overflow redo also recomputes the channel order (equal to exact stats). bench/test.sh: 119 ok.
-- Bench: `APA_ERRSRC=1` (host emulation per quantization error source on the top-20 pairs), fallback study in
-  `-DAPA_DBG` `APA_FULL` runs; `bench/test.sh` builds `APA_Q2=0 / 1` and checks legacy vs `REF` with `APA_Q2=0`.
+- Pass 1: Q as two E2M1 terms on all 128 channels: term 2 = residual of term 1 in the same row scale, same
+  accumulator; +16 OMMAs per tile; Q buffers in the workspace x2. Cause (AUDIT.md, Phase 6): FP4 rounding of Q
+  decides the worst rows of 0.4.0 (host emulation, top-20 pairs).
+- Pass 1: P scale per 16 keys rounded up to UE4M3 (was a power of two): group maximum near E2M1 6, not anywhere in
+  (3, 6]. Cause (AUDIT.md, Phase 7): after two-term Q, P is the largest error source (lc_122880_2, P exact:
+  0.987731 -> 0.998622). Pass 1 +5.1 to +5.2 %.
+- 12 dumps, eps 0.005, all pairs, vs 0.4.0: pairs < 0.9 137 -> 0, < 0.99 5196 -> 1163, worst min cos
+  0.773144 -> 0.980723; attention +9.7 to +25.8 % (two runs). KvState last chunk, lc_122880_2: min cos
+  0.821417 -> 0.988101, pairs < 0.9 24 -> 0.
+- Measured, not kept (AUDIT.md, Phase 8): second Q term on 64 channels ranked by sum |q| x K rms (0afa277 default).
+  Same run, 12 dumps, vs all 128 channels: pairs < 0.99 1640 vs 1163, mean cos lower or equal on all 12; the
+  128-channel kernel takes -0.4 to +4.7 % attention time on the 9 long dumps, less prep (lc_32768_0 0.181 -> 0.166
+  ms). Removed: `APA_Q2`, `APA_PFINE`, `APA_QPERM_K`, `q_perm_kernel`, K^2 stats.
+- Bench: `APA_ERRSRC=1` (host emulation per quantized operand on the top-20 pairs). `bench/test.sh`: `REF` = build of
+  an earlier commit with the same kernel, outputs bitwise; 115 ok.
 
 ## 0.4.0 (2026-10-08)
 

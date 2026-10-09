@@ -14,7 +14,7 @@
 \title{APA: Adaptive-Precision Attention\\
 \large Exact FP16 for the Few Tiles That Matter, FP4 for the Rest}
 \author{Raphael Friedmann\\\small\url{https://github.com/kekzl/apa}}
-\date{October 2026, APA 0.4.0}
+\date{October 2026, APA 0.5.0}
 
 \begin{document}
 \maketitle
@@ -31,9 +31,9 @@ below the FP4 scale range and round to zero. Keeping the cold frame at most $2^{
 the minimum cosine similarity over all 49152 (row, head) pairs of the worst of six Llama-3.2-3B attention
 dumps from $-0.638155$ to 0.841302 and removes all 899 pairs with negative cosine (six dumps), at unchanged speed. The
 rows that remain worst lose their accuracy to FP4 rounding of $Q$, not of $K$, $P$ or $V$ (host emulation per
-error source); a second FP4 term of $Q$ on 64 channels and UE4M3 instead of power-of-two $P$ scales remove all
-137 pairs below cosine 0.9 on twelve dumps and raise the worst minimum from 0.773144 to 0.970867, at 7.0 to
-20.2\,\% more attention time. At
+error source); a second FP4 term of $Q$ and UE4M3 instead of power-of-two $P$ scales remove all 137 pairs
+below cosine 0.9 on twelve dumps and raise the worst minimum from 0.773144 to 0.980723, at 9.7 to 25.8\,\% more
+attention time. At
 $\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and the attention kernel of APA 0.3.0 runs
 2.50$\times$ faster than the same kernel with every tile exact (2.196$\times$ with the 0.730\,ms quantization
 step included); the speedup grows with context from 1.30$\times$ at 8192 keys. Integrated into the imp inference engine (version 0.2.0 of the kernel), dense
@@ -74,8 +74,8 @@ Contributions:
   against a ones tile.
 \item A single fused launch: pass-1 CTAs followed by persistent pass-2 workers that pull work from ticket
   counters and wait on per-query-block release flags, deadlock-free by ticket order.
-\item An error-source analysis of the remaining worst rows (FP4 rounding of $Q$) and a two-term FP4 $Q$ on
-  permuted channels that removes it (Section~\ref{sec:qerr}).
+\item An error-source analysis of the remaining worst rows (FP4 rounding of $Q$, then of $P$), fixed by a two-term
+  FP4 $Q$ and UE4M3 $P$ scales (Section~\ref{sec:qerr}).
 \item Deterministic statistics and an incremental tile cache for chunked prefill over paged KV.
 \end{itemize}
 
@@ -165,21 +165,17 @@ filled by \code{cp.async.bulk} with mbarrier completion (thread 0 is the produce
 \label{alg:pass1}
 \end{figure}
 
-\paragraph{P quantization.} The probabilities of a 16-key group are scaled by $1536/2^k$ with
-$2^k\ge256\cdot\max_{\text{group}}P$, so the quantized values satisfy $P'\le6$ and the scale $2^k$ is an
-exact UE4M3 power of two. The shift is folded into the bias of the exponent, so \code{ex2} directly produces
-$P'$; the global factor 1536 is divided out in the epilogue. \code{APA\_PFINE}=1 rounds the scale up to the next
-UE4M3 value instead (3 mantissa bits, $m=\lceil 8(2^{u-\lfloor u\rfloor}-1)\rceil$, bias $\lfloor u\rfloor+\log_2(1+m/8)$),
-so the group maximum lands near 6 instead of anywhere in $(3,6]$; with two-term $Q$, $P$ is the largest remaining
-error source (Section~\ref{sec:qerr}).
+\paragraph{P quantization.} The probabilities of a 16-key group are scaled by $1536/s$, where $s$ is the smallest
+UE4M3 value with $s\ge256\cdot\max_{\text{group}}P$: with $u$ the required $\log_2 s$, $m=\lceil 8(2^{u-\lfloor u\rfloor}-1)\rceil$
+and $s=2^{\lfloor u\rfloor}(1+m/8)$ (3 mantissa bits; $m=8$ carries into the exponent). The quantized values satisfy
+$P'\le6$, and the group maximum lands near 6 instead of anywhere in $(3,6]$ as with a power of two (0.4.0). The
+shift $\lfloor u\rfloor+\log_2(1+m/8)$ is folded into the bias of the exponent, so \code{ex2} directly produces $P'$;
+the global factor 1536 is divided out in the epilogue.
 
-\paragraph{Two-term Q.} $Q$ is quantized twice: $Q_1$ as in Table~\ref{tab:prep} and $Q_2$, the E2M1 residual $Q-Q_1$ in the same row
-scale, so $S=Q_1K^\top+Q_2K^\top$ accumulates in one fragment with the same K operands. \code{APA\_Q2}=2 keeps
-$Q_2$ on the 64 channels of largest $\sum|q_c|\cdot\mathrm{rms}(k_c-\bar k_c)$ of the KV head (every 16th position, all
-$G$ heads; the score error of channel $c$ scales with both): prep permutes the
-channels of $Q$ and $K$ alike so that they form the first $k$-step, which adds 8 OMMAs per tile (16 for all
-channels, \code{APA\_Q2}=1). The KvState freezes the permutation with its statistics. Section~\ref{sec:qerr}
-shows why: FP4 rounding of $Q$ decides the worst rows.
+\paragraph{Two-term Q.} $Q$ is quantized twice: $Q_1$ as in Table~\ref{tab:prep} and $Q_2$, the E2M1 residual $Q-Q_1$ in the
+same row scale, so $S=Q_1K^\top+Q_2K^\top$ accumulates in one fragment with the same K operands, at 16 more OMMAs
+per tile. Section~\ref{sec:qerr} shows why: FP4 rounding of $Q$, not of $K$, $P$ or $V$, decided the worst rows;
+with two terms, $P$ became the largest error source, which the UE4M3 scale above addresses.
 
 \paragraph{Lazy maximum.} The running maximum $m$ (log$_2$ domain) is updated, with a full quad reduction
 and a rescale of $o$, $\ell_{\text{cold}}$ and $\lambda$, only when some score exceeds $m+\tau$ with
@@ -390,8 +386,9 @@ covers only the first 65536, 81920, 98304 or 108544 keys gives 431, 222, 104 and
 1452 to 29 pairs below 0.99 (exact stats), at 182.88 instead of 178.32\,ms for 60 chunks. With the sampled stats and
 power-of-two scales of the prep and an overflow redo, every restat chunk equals the full requantization bitwise
 (27 of 60 chunks on lc\_122880\_*); the last chunk reaches 0.821417 and 24 pairs below 0.9 (full
-requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. (0.4.0, single-term $Q$.) With two-term $Q$ and UE4M3 $P$ scales the last chunk reaches 0.990915 and no pair below 0.9 (full
-requantization: 0.981924, 0). 5 reruns stay bitwise identical.
+requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. (0.4.0, single-term $Q$.)
+With two-term $Q$ and UE4M3 $P$ scales the last chunk reaches 0.988101 and no pair below 0.9 (full requantization:
+0.980723, 0). 5 reruns stay bitwise identical.
 
 \subsection{Error source of the worst rows}
 \label{sec:qerr}
@@ -403,7 +400,7 @@ estimate of the cold share matches FP32, so no mass is lost; a fallback on a lar
 since every warp of the dump has a row with cold share above 0.3. Table~\ref{tab:qerr} emulates on the host one
 quantization at a time on the cold tiles of the 20 worst pairs (hot tiles exact, as pass 2). The emulation with
 all sources reproduces the kernel; $Q$ alone accounts for the error, while $K$, $P$ or $V$ alone keep the mean
-at or above 0.996408. A second FP4 term of $Q$ removes the error, on 64 of 128 channels nearly as well as on all.
+at or above 0.996408. A second FP4 term of $Q$ removes the error.
 
 \begin{table}[t]
 \centering\small
@@ -429,12 +426,14 @@ quantized as in pass 1 (host emulation).}
 \end{table}
 
 
-With two terms, the worst pairs change. Table~\ref{tab:qerr2} repeats the emulation on the 20 worst pairs of the
-two-term kernel, with the channel order and blocks of the kernel. $P$ is now the largest source: exact $P$ lifts
-lc\_122880\_2 from 0.987731 to 0.998622, exact $K$, $V$ or $Q$ much less. On lc\_122880\_0 the residual on the 64
-channels of largest $|q|$ is worse than a single term (0.972530 against 0.981784); ranking the channels by
-$|q_c|\cdot\mathrm{rms}(k_c-\bar k_c)$ fixes it (0.982564). A UE4M3 instead of a power-of-two $P$ scale and the
-$K$-weighted ranking together come close to the residual on all 128 channels at half its MMA cost.
+With two terms, the worst pairs change. Table~\ref{tab:qerr2} repeats the emulation on the 20 worst pairs of an
+intermediate kernel that kept the second term on 64 channels only (8 instead of 16 extra OMMAs), with its channel
+order and blocks. $P$ is now the largest source: exact $P$ lifts lc\_122880\_2 from 0.987731 to 0.998622. The
+64-channel variants depend on a channel ranking whose effect changes sign between dumps (by $|q|$, lc\_122880\_0
+falls below a single term); the second term on all 128 channels with UE4M3 $P$ scales is best on all three dumps.
+On all twelve dumps it is better or equal in mean cosine and in pairs below 0.99 than the 64-channel kernel with
+ranking by $|q|\,r_k$ and UE4M3 $P$ (1163 against 1640 pairs below 0.99, worst minimum 0.980723 against 0.970867),
+at $-0.4$ to $+4.7$\,\% attention time (same run). The kernel uses it.
 
 \begin{table}[t]
 \centering\scriptsize
@@ -470,31 +469,30 @@ $r_k=\mathrm{rms}(k-\bar k)$ per channel.}
  & \multicolumn{2}{c}{min cos} & \multicolumn{2}{c}{pairs $<0.99$} & \multicolumn{2}{c}{attn ms} \\
 Dump & 0.4.0 & now & 0.4.0 & now & 0.4.0 & now \\
 \midrule
-lc\_122880\_0 & 0.957087 & 0.970867 & 1612 & 1559 & 4.326 & 5.168 \\
-lc\_122880\_1 & 0.972723 & 0.996997 & 13 & 0 & 4.421 & 5.312 \\
-lc\_122880\_2 & 0.847877 & 0.981924 & 1224 & 4 & 4.602 & 5.508 \\
-lc\_65536\_0 & 0.773144 & 0.981789 & 1296 & 73 & 2.885 & 3.271 \\
-lc\_65536\_1 & 0.985146 & 0.997992 & 6 & 0 & 2.981 & 3.264 \\
-lc\_65536\_2 & 0.909434 & 0.991876 & 370 & 0 & 2.868 & 3.296 \\
-lc\_32768\_0 & 0.938131 & 0.987702 & 503 & 2 & 2.364 & 2.640 \\
-lc\_32768\_1 & 0.990549 & 0.998347 & 0 & 0 & 1.835 & 1.963 \\
-lc\_32768\_2 & 0.970655 & 0.993729 & 170 & 0 & 1.844 & 2.008 \\
-ra2dump\_59 & 0.993380 & 0.998648 & 0 & 0 & 0.169 & 0.167 \\
-ra2dump\_78 & 0.991309 & 0.987324 & 0 & 2 & 0.149 & 0.155 \\
-ra2dump\_87 & 0.983843 & 0.998256 & 2 & 0 & 0.295 & 0.297 \\
+lc\_122880\_0 & 0.957087 & 0.982774 & 1612 & 1115 & 4.326 & 5.394 \\
+lc\_122880\_1 & 0.972723 & 0.997516 & 13 & 0 & 4.421 & 5.563 \\
+lc\_122880\_2 & 0.847877 & 0.980723 & 1224 & 4 & 4.602 & 5.708 \\
+lc\_65536\_0 & 0.773144 & 0.985485 & 1296 & 42 & 2.885 & 3.373 \\
+lc\_65536\_1 & 0.985146 & 0.997955 & 6 & 0 & 2.981 & 3.352 \\
+lc\_65536\_2 & 0.909434 & 0.990073 & 370 & 0 & 2.868 & 3.446 \\
+lc\_32768\_0 & 0.938131 & 0.990098 & 503 & 0 & 2.364 & 2.594 \\
+lc\_32768\_1 & 0.990549 & 0.998213 & 0 & 0 & 1.835 & 2.033 \\
+lc\_32768\_2 & 0.970655 & 0.993297 & 170 & 0 & 1.844 & 2.057 \\
+ra2dump\_59 & 0.993380 & 0.996188 & 0 & 0 & 0.169 & 0.175 \\
+ra2dump\_78 & 0.991309 & 0.988453 & 0 & 2 & 0.149 & 0.157 \\
+ra2dump\_87 & 0.983843 & 0.997270 & 2 & 0 & 0.295 & 0.321 \\
 \bottomrule
 \end{tabular}
-\caption{0.4.0 (single-term $Q$, power-of-two $P$ scales) vs now (two-term $Q$ on 64 channels ranked by
-$|q|\cdot\mathrm{rms}(k)$, UE4M3 $P$ scales), all 49152 pairs, $\eps=0.005$; times from two runs. Pairs below 0.9:
+\caption{0.4.0 (single-term $Q$, power-of-two $P$ scales) vs now (two-term $Q$, UE4M3 $P$ scales), all 49152 pairs,
+$\eps=0.005$; times from two runs. Pairs below 0.9:
 137 $\to$ 0. ra2dump: 2048 queries at 2048 or 4096 keys.}
 \label{tab:q2}
 \end{table}
 
 Table~\ref{tab:q2} shows the current kernel. All 137 pairs below 0.9 disappear, the worst minimum rises from 0.773144
-to 0.970867, and pairs below 0.99 fall from 5196 to 1640 in total (9 dumps fewer, 2 at zero, ra2dump\_78 0 $\to$ 2).
-Attention time grows by 7.0 to 20.2\,\% on the nine long dumps (two runs); of that, the second $Q$ term costs pass 1
-13.5 to 19.0\,\% and the UE4M3 $P$ scale 5.1 to 5.2\,\%. With two terms, $\eps=0.01$ is faster than one term at
-0.005 up to 65536 keys with no pair below 0.9 on the twelve dumps.
+to 0.980723, and pairs below 0.99 fall from 5196 to 1163 in total (9 dumps fewer, 2 at zero, ra2dump\_78 0 $\to$ 2).
+Attention time grows by 9.7 to 25.8\,\% on the nine long dumps (two runs): the second $Q$ term doubles the $QK^\top$
+OMMAs of pass 1 (pass 1 alone +24.1 to +30.7\,\%), the UE4M3 $P$ scale adds 5.1 to 5.2\,\%.
 
 \subsection{Threshold and context length}
 
@@ -649,7 +647,7 @@ APA 0.2.0 / 0.1.0.}
   cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
   decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
   would target such rows. With two-term $Q$ and UE4M3 $P$ scales the worst pair of twelve dumps has
-  cosine 0.970867 (lc\_122880\_0), which also has the most pairs below 0.99 (1559).
+  cosine 0.980723 (lc\_122880\_2); lc\_122880\_0 has the most pairs below 0.99 (1115).
 \item \textbf{Chunked prefill.} The incremental tile cache keeps the K mean of its last restat; on
   lc\_122880\_2 the pairs below 0.9 grow from 24 to 431 as the context grows to 1.84 times the keys of that mean
   (1.11 times: 56; single-term $Q$; with two-term $Q$ the last chunk has none). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score

@@ -71,21 +71,6 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
 }
 
 // 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale).
-// APA_Q2: Q also as a second E2M1 term, the residual of the first in the same row scale (FP4 Q error dominates the
-// worst rows). 1: residual on all channels (+16 OMMAs per tile); 2: on the 64 channels of largest |q| (per-kv-head
-// channel order of Q and K, +8 OMMAs); 0: off. All pairs, eps 0.005, lc_65536_0: min cos 0.773 -> 0.978 (2).
-#ifndef APA_Q2
-#define APA_Q2 2
-#endif
-// APA_QPERM_K 1: the APA_Q2 2 channel order ranks sum |q| x centred K rms (score error ~ |dq_c| x |k_c - mean|).
-#ifndef APA_QPERM_K
-#define APA_QPERM_K 1
-#endif
-// APA_PFINE 1: pass-1 P scale per 16 keys rounded up to UE4M3 (3 mantissa bits) instead of a power of two, so the
-// group maximum lands near E2M1 6 instead of anywhere in (3, 6].
-#ifndef APA_PFINE
-#define APA_PFINE 1
-#endif
 // Values an E2M1 x UE4M3 block (quant16 output) stands for, as the MMA reads them.
 __device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
   constexpr float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Test matrix on a GPU. DUMPS: dir of dump *.bin (all used), OUT: logs (build/test), IMAGE (imp:toolchain),
-# REF: optional older bench binary in build/ whose output must match the APA_PREP_SAMPLE=0 build bitwise.
+# REF: optional bench binary in build/ of an earlier commit with the same kernel; outputs must match bitwise.
 # Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, all-pairs
 # accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats. Exit 1 on any failed check.
 set -u
@@ -26,9 +26,8 @@ run() {  # bin dump log env...
 has() { grep -qE "$2" "$OUT/$1.log"; }
 none() { ! grep -qE "$2" "$OUT/$1.log"; }
 
-for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0 -DAPA_Q2=0 -DAPA_PFINE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" \
-         "pov:-DAPA_PREP_HEADROOM=0.015625f" "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" \
-         "q20:-DAPA_Q2=0" "q21:-DAPA_Q2=1" "pf0:-DAPA_PFINE=0" "qk0:-DAPA_QPERM_K=0"; do
+for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" "pov:-DAPA_PREP_HEADROOM=0.015625f" \
+         "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX"; do
   check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
 done
 for f in "$DUMPS"/*.bin; do
@@ -47,9 +46,8 @@ for f in "$DUMPS"/*.bin; do
   check "$d forced overflow redo = exact stats" cmp -s "$OUT/${d}_pov_0.005000" "$OUT/${d}_pp2_0.005000"
   if [ -n "${REF:-}" ]; then
     run "$REF" "$d" "${d}_ref" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ref
-    run test_ps0 "$d" "${d}_ps0" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ps0
-    check "$d legacy (prep sample 0, APA_Q2 0, APA_PFINE 0) = $REF" \
-      cmp -s "$OUT/${d}_ref_0.005000" "$OUT/${d}_ps0_0.005000"
+    run test_def "$d" "${d}_cur" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_cur
+    check "$d default = $REF" cmp -s "$OUT/${d}_ref_0.005000" "$OUT/${d}_cur_0.005000"
   fi
 done
 [ $fail -eq 0 ] && echo "ALL OK" || echo "FAILED"

@@ -268,3 +268,30 @@ Decision: both on (default eps 0.005 aggregate, error model |dq_c| x |k_c - mean
 bench/test.sh found the overflow redo keeping the sampled channel order (forced redo != exact stats on 9 dumps): the redo
 now recomputes K^2 sums, rms and the order. Final, 12 dumps: pairs < 0.9 0, < 0.99 1640 (0.4.0: 5196), worst min 0.970867;
 bench/test.sh 119 ok.
+
+## Phase 8: one scheme
+
+Runs: PERF_LOG "Phase 8". Same run, eps 0.005, all pairs. v_cur = 0afa277 defaults (second Q term on 64 channels by
+sum |q| x K rms, UE4M3 P); v_all = second Q term on all 128 channels, UE4M3 P. Cells: v_cur / v_all.
+
+| Dump | pairs < 0.99 | min cos | mean cos | attn ms |
+|---|---|---|---|---|
+| lc_122880_0 | 1559 / 1115 | 0.970867 / 0.982774 | 0.998859 / 0.999022 | 5.216 / 5.394 |
+| lc_122880_1 | 0 / 0 | 0.996997 / 0.997516 | 0.999951 / 0.999955 | 5.349 / 5.563 |
+| lc_122880_2 | 4 / 4 | 0.981924 / 0.980723 | 0.999784 / 0.999833 | 5.494 / 5.708 |
+| lc_65536_0 | 73 / 42 | 0.981789 / 0.985485 | 0.999228 / 0.999279 | 3.272 / 3.373 |
+| lc_65536_1 | 0 / 0 | 0.997992 / 0.997955 | 0.999961 / 0.999965 | 3.261 / 3.352 |
+| lc_65536_2 | 0 / 0 | 0.991876 / 0.990073 | 0.999845 / 0.999870 | 3.292 / 3.446 |
+| lc_32768_0 | 2 / 0 | 0.987702 / 0.990098 | 0.999622 / 0.999660 | 2.604 / 2.594 |
+| lc_32768_1 | 0 / 0 | 0.998347 / 0.998213 | 0.999969 / 0.999972 | 1.961 / 2.033 |
+| lc_32768_2 | 0 / 0 | 0.993729 / 0.993297 | 0.999871 / 0.999892 | 2.001 / 2.057 |
+| ra2dump_59 | 0 / 0 | 0.998648 / 0.996188 | 0.999990 / 0.999990 | 0.165 / 0.175 |
+| ra2dump_78 | 2 / 2 | 0.987324 / 0.988453 | 0.999985 / 0.999988 | 0.154 / 0.157 |
+| ra2dump_87 | 0 / 0 | 0.998256 / 0.997270 | 0.999969 / 0.999975 | 0.296 / 0.321 |
+
+v_all: pairs < 0.99 lower or equal on 12 of 12 (1640 -> 1163), mean cos higher or equal on 12 of 12, min cos lower on
+7 of 12 (all >= 0.980723, the worst-dump minimum), attention -0.4 to +4.7 % on the 9 long dumps, prep lower on 12 of 12.
+
+Decision: v_all is the only scheme. Removed: `APA_Q2`, `APA_PFINE`, `APA_QPERM_K`, `q_perm_kernel`, channel
+permutation in quant_q / quant_kv, K^2 stats. Library vs v0.4.0: 4 files, +49 / -9. bench/test.sh with `REF=v_all`:
+115 ok, default = v_all bitwise on 12 of 12 dumps.
