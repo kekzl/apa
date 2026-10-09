@@ -164,9 +164,18 @@ __device__ __forceinline__ void p_scales(const float (&gm)[4], float m_lo, float
   for (int i = 0; i < 4; ++i) {
     const float m = (i & 1) ? m_hi : m_lo;
     const float u = fminf(fmaxf(fmaf(gm[i], (i & 1) ? c_hi : c_lo, (8.f - TAU) - m), -6.f), 8.f);
+#if APA_PFINE
+    // scale 2^floor(u) * (1 + mi / 8) >= 2^u, mi = ceil((2^frac - 1) * 8) in 0..8 (8 carries into the exponent code)
+    const float vd = __fadd_rd(u, 12582919.f);  // floor(u) + 7 in the low mantissa bits
+    const float fl = vd - 12582919.f;
+    const float mm = __fadd_ru((ex2(u - fl) - 1.f) * 8.f, 12582912.f);
+    kb[i] = ((__float_as_uint(vd) - 0x4B400000u) << 3) + (__float_as_uint(mm) - 0x4B400000u);
+    bias[i] = (LOG2_PS - TAU - m) - (fl + lg2(1.f + (mm - 12582912.f) * 0.125f));
+#else
     const float v = __fadd_ru(u, 12582919.f);  // 1.5*2^23 + 7: ceil(u) + 7 in the low mantissa bits
     kb[i] = (__float_as_uint(v) - 0x4B400000u) << 3;
     bias[i] = (LOG2_PS - TAU - m) - (v - 12582919.f);  // P' <= 6 also when m lags by TAU
+#endif
   }
 }
 

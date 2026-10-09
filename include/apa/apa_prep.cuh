@@ -109,26 +109,30 @@ struct PagedNvfp4KV {
 
 // ---------------------------------------------------------------- stats: K mean, K/V amax per (b, kv head)
 // grid (ceil(ntkv / STATS_TILES), Hkv, B), 256 threads. amax[bhk*3 + {1:k, 2:v}] as uint bits (atomicMax),
-// kpart[bhk][chunk][D] K column sums of the chunk. stride > 1: block x reads chunk x * stride only (sampled stats).
+// kpart[bhk][chunk][D] K column sums of the chunk (kpart2: of K^2, for the channel rms). stride > 1: block x reads
+// chunk x * stride only (sampled stats).
 template <int D, typename Reader>
 __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* kpart,
-                                                    const int* redo = nullptr, int stride = 1) {
+                                                    const int* redo = nullptr, int stride = 1,
+                                                    float* kpart2 = nullptr) {
   if (redo != nullptr && *redo == 0) return;  // KvState still valid: stats stay frozen
   constexpr int G16 = D / 16, RSTEP = 256 / G16, NWARP = 8;
   __shared__ float red[NWARP][D];
+  __shared__ float red2[APA_Q2 == 2 ? NWARP : 1][D];
   const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tid = threadIdx.x;
   const int g = tid % G16, s0 = blockIdx.x * stride * STATS_TILES * BKV, s1 = min(s0 + STATS_TILES * BKV, dm.Skv);
   // Column sums in a fixed order (deterministic): registers over this thread's rows, then lanes of the same
   // channel group (xor G16 .. 16), then the 8 warps in order. Maxima are order-free (atomicMax).
-  float acc[16], x[16], ak = 0.f, av = 0.f;
+  float acc[16], acc2[16], x[16], ak = 0.f, av = 0.f;
 #pragma unroll
-  for (int i = 0; i < 16; ++i) acc[i] = 0.f;
+  for (int i = 0; i < 16; ++i) acc[i] = acc2[i] = 0.f;
   for (int s = s0 + tid / G16; s < s1; s += RSTEP) {
     rd.load16(false, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       ak = fmaxf(ak, fabsf(x[i]));
       acc[i] += x[i];
+      acc2[i] += x[i] * x[i];
     }
     rd.load16(true, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
@@ -137,10 +141,16 @@ __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned
 #pragma unroll
   for (int o = G16; o < 32; o <<= 1)
 #pragma unroll
-    for (int i = 0; i < 16; ++i) acc[i] += __shfl_xor_sync(~0u, acc[i], o);
+    for (int i = 0; i < 16; ++i) {
+      acc[i] += __shfl_xor_sync(~0u, acc[i], o);
+      acc2[i] += __shfl_xor_sync(~0u, acc2[i], o);
+    }
   if ((tid & 31) < G16)
 #pragma unroll
-    for (int i = 0; i < 16; ++i) red[tid >> 5][g * 16 + i] = acc[i];
+    for (int i = 0; i < 16; ++i) {
+      red[tid >> 5][g * 16 + i] = acc[i];
+      if (APA_Q2 == 2) red2[APA_Q2 == 2 ? tid >> 5 : 0][g * 16 + i] = acc2[i];
+    }
   for (int o = 16; o; o >>= 1) {
     ak = fmaxf(ak, __shfl_xor_sync(~0u, ak, o));
     av = fmaxf(av, __shfl_xor_sync(~0u, av, o));
@@ -155,6 +165,12 @@ __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned
 #pragma unroll
     for (int w = 0; w < NWARP; ++w) sum += red[w][d];
     kpart[((size_t)bhk * gridDim.x + blockIdx.x) * D + d] = sum;
+    if (APA_Q2 == 2 && kpart2 != nullptr) {
+      float s2 = 0.f;
+#pragma unroll
+      for (int w = 0; w < NWARP; ++w) s2 += red2[APA_Q2 == 2 ? w : 0][d];
+      kpart2[((size_t)bhk * gridDim.x + blockIdx.x) * D + d] = s2;
+    }
   }
 }
 
@@ -166,7 +182,8 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
                                                            const float* __restrict__ kpart, int nchunk,
                                                            float* __restrict__ kmean, HeadScale* __restrict__ hs,
                                                            int n, float headroom, const int* redo = nullptr,
-                                                           bool pow2 = false) {
+                                                           bool pow2 = false, const float* kpart2 = nullptr,
+                                                           float* krms = nullptr) {
   if (redo != nullptr && *redo == 0) return;
   __shared__ float red[D];
   const int bhk = blockIdx.x, d = threadIdx.x;
@@ -174,6 +191,11 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
   for (int c = 0; c < nchunk; ++c) sum += kpart[((size_t)bhk * nchunk + c) * D + d];
   const float m = sum / n;
   kmean[bhk * D + d] = m;
+  if (krms != nullptr) {  // centred channel rms (APA_Q2 2 channel order), chunks in order
+    float s2 = 0.f;
+    for (int c = 0; c < nchunk; ++c) s2 += kpart2[((size_t)bhk * nchunk + c) * D + d];
+    krms[bhk * D + d] = sqrtf(fmaxf(s2 / n - m * m, 0.f));
+  }
   red[d] = fabsf(m);
   __syncthreads();
   for (int o = D / 2; o; o >>= 1) {
@@ -306,17 +328,18 @@ __global__ void __launch_bounds__(32) kv_fingerprint_kernel(Reader rd, Dims dm, 
 
 // ---------------------------------------------------------------- Q packing + quantization
 // APA_Q2 2, grid (Hkv, B), 1024 threads (1024 / D row groups): channel order of (b, kv head) for Q and K. The D / 2
-// channels of largest sum |q| (every 4th position, all G heads) come first (residual Q term = first k-step), the rest
-// after; both halves ascending. Fixed summation order: deterministic. redo: KvState gate (skip when 0).
+// channels of largest sum |q| (every 16th position, all G heads) x K rms (krms) come first (residual Q term = first
+// k-step), the rest after; both halves ascending. Fixed summation order: deterministic. redo: KvState gate (skip when 0).
 template <int D, typename T>
 __global__ void __launch_bounds__(1024) q_perm_kernel(const T* __restrict__ Q, Dims dm, uint8_t* __restrict__ perm,
-                                                     const int* redo = nullptr) {
+                                                     const int* redo = nullptr,
+                                                     const float* __restrict__ krms = nullptr) {
   if (redo != nullptr && *redo == 0) return;
   constexpr int NG = 1024 / D;
   __shared__ float part[NG][D];
   __shared__ int ina[D];
   const int b = blockIdx.y, hk = blockIdx.x, bhk = b * dm.Hkv + hk, c = threadIdx.x % D, grp = threadIdx.x / D;
-  const int st = dm.Sq >= 64 ? 4 : 1, n = (dm.Sq + st - 1) / st * dm.G;
+  const int st = dm.Sq >= 256 ? 16 : dm.Sq >= 64 ? 4 : 1, n = (dm.Sq + st - 1) / st * dm.G;
   float sum = 0.f;
 #pragma unroll 8
   for (int i = grp; i < n; i += NG) {
@@ -329,6 +352,7 @@ __global__ void __launch_bounds__(1024) q_perm_kernel(const T* __restrict__ Q, D
   float imp = 0.f;
 #pragma unroll
   for (int k = 0; k < NG; ++k) imp += part[k][c];
+  if (krms != nullptr) imp *= krms[bhk * D + c];  // score error of channel c ~ |q_c| x rms(k_c - mean)
   part[0][c] = imp;
   asm volatile("bar.sync 1, %0;" ::"r"(D) : "memory");
   int rank = 0;

@@ -59,6 +59,8 @@ struct Workspace {
   int W, nqb;                    // mask words per warp / CTA, q blocks per (b, kv head)
   int kvcap;                     // KV / hs / ksum from a KvState of this many tiles (0: own, ntkv)
   float* kpart;                  // [bhk][nchunk][D] K column sums per stats chunk (deterministic mean)
+  float* kpart2 = nullptr;        // APA_Q2 2: K^2 column sums per chunk; krms [bhk][D] centred channel rms
+  float* krms = nullptr;
   int nchunk;
 #ifdef APA_DBG
   float4* dbg = nullptr;  // [rows] pass-1 row state (bench APA_FULL); nullptr: not written
@@ -99,6 +101,10 @@ inline Workspace carve(const Problem& p, void* base, bool own_kv = true) {
   w.ml = reinterpret_cast<float2*>(take(rows * 8));
   w.nchunk = (dm.ntkv + STATS_TILES - 1) / STATS_TILES;
   w.kpart = reinterpret_cast<float*>(take(bhk * w.nchunk * p.D * 4));
+  if (APA_Q2 == 2) {
+    w.kpart2 = reinterpret_cast<float*>(take(bhk * w.nchunk * p.D * 4));
+    w.krms = reinterpret_cast<float*>(take(bhk * p.D * 4));
+  }
   w.bytes = off;
   return w;
 }
@@ -168,7 +174,9 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
   const int stride = stats_stride(w.nchunk);
 #endif
   const int ns = (w.nchunk + stride - 1) / stride, nkeys = stats_keys(p.Skv, w.nchunk, stride);
-  stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, nullptr, stride);
+  uint8_t* const perm = APA_Q2 == 2 && D == 128 ? w.perm : nullptr;  // channel order of Q and K (APA_Q2 2)
+  stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, nullptr, stride,
+                                                               perm ? w.kpart2 : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
 #ifdef APA_DBG_KMEAN_LEN  // diagnostic: K mean over the first N keys only (multiple of 1024), maxima over all
   const int kml = std::min(p.Skv, APA_DBG_KMEAN_LEN), kmc = kml / (STATS_TILES * BKV);
@@ -185,19 +193,24 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
 #endif
   constexpr bool P2 = APA_PREP_SAMPLE > 0;  // 0: exact stats, exact head scales (0.3.0 prep)
   const bool chk = P2 && (stride > 1 || APA_PREP_HEADROOM < 1.f);  // exact stats x >= 1 cannot overflow
-  uint8_t* const perm = APA_Q2 == 2 && D == 128 ? w.perm : nullptr;  // channel order of Q and K (APA_Q2 2)
-  if (perm != nullptr) q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, st>>>(Q, dm, perm);
   finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, ns, w.ksum, w.hs, kml,
-                                                       P2 ? APA_PREP_HEADROOM : 1.f, nullptr, P2);
+                                                       P2 ? APA_PREP_HEADROOM : 1.f, nullptr, P2,
+                                                       perm ? w.kpart2 : nullptr, perm ? w.krms : nullptr);
+  if (perm != nullptr)
+    q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, st>>>(Q, dm, perm, nullptr, APA_QPERM_K ? w.krms : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, 0, nullptr, chk ? w.ovf : nullptr,
                                                   perm);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   if (chk) {  // redo on overflow (kernels exit early when ovf == 0)
     reset_stats_kernel<D><<<(unsigned)bhk, 32, 0, st>>>(w.amax, w.ovf);
-    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, w.ovf);
+    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, w.ovf, 1,
+                                                                        perm ? w.kpart2 : nullptr);
     finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv,
-                                                         std::max(KV_HEADROOM, 1.f), w.ovf, P2);
+                                                         std::max(KV_HEADROOM, 1.f), w.ovf, P2,
+                                                         perm ? w.kpart2 : nullptr, perm ? w.krms : nullptr);
+    if (perm != nullptr)  // channel order from the exact stats too (equal to a prep without sampling)
+      q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, st>>>(Q, dm, perm, w.ovf, APA_QPERM_K ? w.krms : nullptr);
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0, dm.ntkv, w.ovf, nullptr, perm);
     if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   }
@@ -401,20 +414,27 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
   }
   if (e != cudaSuccess) return e;
   uint8_t* const perm = APA_Q2 == 2 && D == 128 ? st.perm : nullptr;  // frozen with the stats
-  if (perm != nullptr) q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, s>>>(Q, dm, perm, gate);
-  stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate, stride);
+  stats_kernel<D, Reader><<<dim3(ns, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate, stride,
+                                                              perm ? w.kpart2 : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, ns, st.kmean, st.hs,
-                                             stats_keys(p.Skv, w.nchunk, stride), KV_HEADROOM, gate, P2);
+                                             stats_keys(p.Skv, w.nchunk, stride), KV_HEADROOM, gate, P2,
+                                             perm ? w.kpart2 : nullptr, perm ? w.krms : nullptr);
+  if (perm != nullptr)
+    q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, s>>>(Q, dm, perm, gate, APA_QPERM_K ? w.krms : nullptr);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, restart ? 0 : st.len / BKV, gate,
                                                  P2 ? w.ovf : nullptr, perm);
   if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   if (P2) {  // a key beyond the frozen or sampled scales: exact stats over all keys, every tile again (gated)
     reset_stats_kernel<D><<<bhk, 32, 0, s>>>(w.amax, w.ovf);
-    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, w.ovf);
+    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, w.ovf, 1,
+                                                                       perm ? w.kpart2 : nullptr);
     finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv,
-                                               std::max(KV_HEADROOM, 1.f), w.ovf, true);
+                                               std::max(KV_HEADROOM, 1.f), w.ovf, true,
+                                               perm ? w.kpart2 : nullptr, perm ? w.krms : nullptr);
+    if (perm != nullptr)
+      q_perm_kernel<D, T><<<dim3(p.Hkv, p.B), 1024, 0, s>>>(Q, dm, perm, w.ovf, APA_QPERM_K ? w.krms : nullptr);
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dq, st.kmean, st.hs, st.KV, 0, dm.ntkv, w.ovf, nullptr, perm);
     if ((e = cudaPeekAtLastError()) != cudaSuccess) return e;
   }

@@ -77,6 +77,15 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
 #ifndef APA_Q2
 #define APA_Q2 2
 #endif
+// APA_QPERM_K 1: the APA_Q2 2 channel order ranks sum |q| x centred K rms (score error ~ |dq_c| x |k_c - mean|).
+#ifndef APA_QPERM_K
+#define APA_QPERM_K 1
+#endif
+// APA_PFINE 1: pass-1 P scale per 16 keys rounded up to UE4M3 (3 mantissa bits) instead of a power of two, so the
+// group maximum lands near E2M1 6 instead of anywhere in (3, 6].
+#ifndef APA_PFINE
+#define APA_PFINE 1
+#endif
 // Values an E2M1 x UE4M3 block (quant16 output) stands for, as the MMA reads them.
 __device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
   constexpr float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
@@ -120,6 +129,11 @@ __device__ __forceinline__ void ldsm_x4(uint32_t* r, uint32_t addr) {
 __device__ __forceinline__ float ex2(float x) {
   float y;
   asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+__device__ __forceinline__ float lg2(float x) {
+  float y;
+  asm("lg2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
 }
 

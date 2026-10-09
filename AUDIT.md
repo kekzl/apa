@@ -250,3 +250,21 @@ bench/test.sh with `APA_Q2=2`: 117 ok (all checks of Phase 5; legacy `APA_PREP_S
 
 Open: prep +0.04 ms at 122880 keys (0.480 -> 0.520), +0.06 ms at 32768 (0.138 -> 0.196) from the channel order
 (q_perm_kernel, permuted quant_kv / quant_q); not profiled.
+
+## Phase 7: P scale and channel ranking after two-term Q
+
+Runs: PERF_LOG "Phase 7". Q2-faithful emulation on the top 20 of 5da6af7 (kernel channel order and blocks, frame-relative
+P scales): exact P lifts lc_122880_2 0.987731 -> 0.998622 (exact K / V / Q: 0.987592 / 0.989307 / 0.991577); P is the
+largest error source. Ranking by sum |q| only makes lc_122880_0 worse than one term (0.972530 vs 0.981784).
+
+| Change | Kernel, eps 0.005, all pairs | Cost |
+|---|---|---|
+| UE4M3 P scale (`APA_PFINE`) | pairs < 0.99 vs 5da6af7, 6 dumps: 1889 / 74 / 76 / 6 / 18 / 11 -> 1830 / 5 / 30 / 0 / 6 / 0 | pass 1 +5.1 to +5.2 % |
+| rank by sum \|q\| x K rms (`APA_QPERM_K`) | mixed alone (lc_122880_0 1889 -> 1592, lc_65536_0 76 -> 312) | stats sum K^2 |
+| both, 12 dumps | < 0.99 1873 (P only) -> 1736, worst min 0.963537 -> 0.974976 (eps 0.01: 3742 -> 4165) | - |
+| q_perm every 16th position | lc_65536_0 < 0.99 194 -> 73; q_perm 34.27 -> 12.42 us | - |
+
+Decision: both on (default eps 0.005 aggregate, error model |dq_c| x |k_c - mean|); lc_65536_0 stays above P-only (73 vs 30).
+bench/test.sh found the overflow redo keeping the sampled channel order (forced redo != exact stats on 9 dumps): the redo
+now recomputes K^2 sums, rms and the order. Final, 12 dumps: pairs < 0.9 0, < 0.99 1640 (0.4.0: 5196), worst min 0.970867;
+bench/test.sh 119 ok.

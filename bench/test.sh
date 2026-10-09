@@ -26,9 +26,9 @@ run() {  # bin dump log env...
 has() { grep -qE "$2" "$OUT/$1.log"; }
 none() { ! grep -qE "$2" "$OUT/$1.log"; }
 
-for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0 -DAPA_Q2=0" "pp2:-DAPA_PREP_SAMPLE=1000000" \
+for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0 -DAPA_Q2=0 -DAPA_PFINE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" \
          "pov:-DAPA_PREP_HEADROOM=0.015625f" "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" \
-         "q20:-DAPA_Q2=0" "q21:-DAPA_Q2=1"; do
+         "q20:-DAPA_Q2=0" "q21:-DAPA_Q2=1" "pf0:-DAPA_PFINE=0" "qk0:-DAPA_QPERM_K=0"; do
   check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
 done
 for f in "$DUMPS"/*.bin; do
@@ -48,7 +48,8 @@ for f in "$DUMPS"/*.bin; do
   if [ -n "${REF:-}" ]; then
     run "$REF" "$d" "${d}_ref" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ref
     run test_ps0 "$d" "${d}_ps0" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ps0
-    check "$d legacy prep, APA_Q2=0 = $REF" cmp -s "$OUT/${d}_ref_0.005000" "$OUT/${d}_ps0_0.005000"
+    check "$d legacy (prep sample 0, APA_Q2 0, APA_PFINE 0) = $REF" \
+      cmp -s "$OUT/${d}_ref_0.005000" "$OUT/${d}_ps0_0.005000"
   fi
 done
 [ $fail -eq 0 ] && echo "ALL OK" || echo "FAILED"

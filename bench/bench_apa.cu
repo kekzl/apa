@@ -456,9 +456,9 @@ int main(int argc, char** argv) {
 #endif
         std::printf("\n");
       }
-      // APA_ERRSRC=1: error source of the top-20 pairs. Host emulation of one FP4 quantization at a time on the cold
-      // tiles (hot tiles exact, as pass 2): P (E2M1, power-of-two scale per 16 keys), V (E2M1 x UE4M3 per 16 tokens),
-      // QK (Q, mean-centred K in E2M1 x UE4M3 per 16 channels); cos vs FP32 per variant, mean over the 20 pairs.
+      // APA_ERRSRC=1: error source of the top-20 pairs, host emulation of pass 1 on the cold tiles (hot tiles exact, as
+      // pass 2). Q, K in E2M1 x UE4M3 per 16 channels of a channel order (perm), Q residual on its first nres channels;
+      // P in E2M1 with a power-of-two scale per 16 keys; V in E2M1 x UE4M3 per 16 tokens. Mean cos over the 20 pairs.
       if (std::getenv("APA_ERRSRC")) {
         auto e2m1 = [](double x) {  // round to nearest E2M1 magnitude, sign kept, saturating at 6
           static const double g[8] = {0, 0.5, 1, 1.5, 2, 3, 4, 6};
@@ -473,12 +473,15 @@ int main(int argc, char** argv) {
           for (int b0 = 0; b0 < n; b0 += 16) {
             double am = 0;
             for (int i = 0; i < 16; ++i) am = std::max(am, std::fabs(x[b0 + i] / gscale));
-            const double sb = std::max(e4m3(am / 6), 1.0 / 512);
-            for (int i = 0; i < 16; ++i) x[b0 + i] = e2m1(x[b0 + i] / gscale / sb) * sb * gscale;
+            const double sb = e4m3(am / 6);
+            const double inv = 1.0 / std::max(sb, 1.0 / 512);
+            for (int i = 0; i < 16; ++i) x[b0 + i] = e2m1(x[b0 + i] / gscale * inv) * sb * gscale;
           }
         };
         auto up2 = [](double x) { return std::exp2(std::ceil(std::log2(x))); };
-        std::vector<double> kmean((size_t)nkv * hd, 0.0), kam(nkv, 0.0), vam(nkv, 0.0);
+        // per kv head: K mean, maxima, centred rms per channel; |q| sums as q_perm_kernel (every 4th position, G heads)
+        std::vector<double> kmean((size_t)nkv * hd, 0.0), krms((size_t)nkv * hd, 0.0), qimp((size_t)nkv * hd, 0.0);
+        std::vector<double> kam(nkv, 0.0), vam(nkv, 0.0);
         for (int j = 0; j < kv; ++j)
           for (int hh = 0; hh < nkv; ++hh)
             for (int e = 0; e < hd; ++e) {
@@ -487,71 +490,97 @@ int main(int argc, char** argv) {
               kam[hh] = std::max(kam[hh], std::fabs(kk));
               vam[hh] = std::max(vam[hh], (double)std::fabs(__half2float(hv[((size_t)j * nkv + hh) * hd + e])));
             }
-        double acc[10] = {};  // kernel, P, V, QK, all, Q only, K only, all with Q two-term FP4, all with Q FP8
+        for (int j = 0; j < kv; ++j)
+          for (int hh = 0; hh < nkv; ++hh)
+            for (int e = 0; e < hd; ++e) {
+              const double d = __half2float(hk[((size_t)j * nkv + hh) * hd + e]) - kmean[(size_t)hh * hd + e];
+              krms[(size_t)hh * hd + e] += d * d / kv;
+            }
+        for (int s2 = 0; s2 < n; s2 += (n >= 64 ? 4 : 1))
+          for (int hh = 0; hh < nh; ++hh)
+            for (int e = 0; e < hd; ++e) qimp[(size_t)(hh / G) * hd + e] += std::fabs(__half2float(hq[((size_t)s2 * nh + hh) * hd + e]));
+        auto order = [&](int hkv, bool kweight) {  // top 64 first (ties: lower channel), both halves ascending
+          std::vector<double> im(hd);
+          for (int e = 0; e < hd; ++e) im[e] = (float)qimp[(size_t)hkv * hd + e] * (kweight ? std::sqrt(krms[(size_t)hkv * hd + e]) : 1.0);
+          std::vector<int> top(hd, 0), p;
+          for (int e = 0; e < hd; ++e) {
+            int r = 0;
+            for (int e2 = 0; e2 < hd; ++e2) r += im[e2] > im[e] || (im[e2] == im[e] && e2 < e);
+            top[e] = r < hd / 2;
+          }
+          for (int e = 0; e < hd; ++e) if (top[e]) p.push_back(e);
+          for (int e = 0; e < hd; ++e) if (!top[e]) p.push_back(e);
+          return p;
+        };
+        std::vector<int> ident(hd);
+        for (int e = 0; e < hd; ++e) ident[e] = e;
+        constexpr int NV = 12;
+        const char* names[NV] = {"kernel", "1 term", "2 terms 128 ch", "2 terms 64 ch |q|", "2 terms 64 ch |q|*rms(k)",
+                                 "64 |q|, P exact", "64 |q|, K exact", "64 |q|, V exact", "64 |q|, Q exact",
+                                 "64 |q|, P fine scale", "64 |q|*rms(k), P fine scale", "128 ch, P fine scale"};
+        double acc[NV] = {};
         for (int i = 0; i < 20; ++i) {
           const int s = top[i].x, h = top[i].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
           const int r = s * G + h % G, wi = (hkv * w.nqb + r / 192) * 12 + (r % 192) / 16;
           const float* sc = sc20.data() + (size_t)i * kv;
-          double mk = 0, kg, vg;
+          double mk = 0;
           for (int e = 0; e < hd; ++e) mk = std::max(mk, std::fabs(kmean[(size_t)hkv * hd + e]));
-          kg = up2(4 * (kam[hkv] + mk) / 2688), vg = up2(4 * vam[hkv] / 2688);
-          std::vector<double> q(hd), qq(hd);
-          double qam = 0;
-          for (int e = 0; e < hd; ++e) q[e] = __half2float(hq[((size_t)s * nh + h) * hd + e]), qam = std::max(qam, std::fabs(q[e]));
-          qq = q;
-          blockq(qq.data(), hd, std::max(qam, 1e-20) / 2688);
-          std::vector<double> q2(hd), q8(hd);  // two-term FP4 (q_q + (q - q_q)_q), FP8 E4M3 per element (row scale)
-          double ram = 0;
-          for (int e = 0; e < hd; ++e) q2[e] = q[e] - qq[e], ram = std::max(ram, std::fabs(q2[e]));
-          blockq(q2.data(), hd, std::max(ram, 1e-20) / 2688);
-          for (int e = 0; e < hd; ++e) q2[e] += qq[e], q8[e] = e4m3(q[e] / (std::max(qam, 1e-20) / 448)) * std::max(qam, 1e-20) / 448;
-          // residual on 64 of 128 channels only: the head's 64 channels of largest mean |q| over all its rows (fixed set)
-          std::vector<double> qh(hd);
-          {
-            std::vector<std::pair<double, int>> imp(hd);
-            for (int e = 0; e < hd; ++e) {
-              double sabs = 0;
-              for (int s2 = 0; s2 < n; ++s2) sabs += std::fabs(__half2float(hq[((size_t)s2 * nh + h) * hd + e]));
-              imp[e] = {-sabs, e};
-            }
-            std::sort(imp.begin(), imp.end());
-            qh = qq;
-            for (int k2 = 0; k2 < 64; ++k2) qh[imp[k2].second] = q2[imp[k2].second];
+          const double kg = up2(4 * (kam[hkv] + mk) / 2688), vg = up2(4 * vam[hkv] / 2688);
+          std::vector<double> q(hd);
+          double qam = 0, shift = 0;
+          for (int e = 0; e < hd; ++e) {
+            q[e] = __half2float(hq[((size_t)s * nh + h) * hd + e]), qam = std::max(qam, std::fabs(q[e]));
+            shift += q[e] * kmean[(size_t)hkv * hd + e];
           }
-          double shift = 0;
-          for (int e = 0; e < hd; ++e) shift += q[e] * kmean[(size_t)hkv * hd + e];
-          // exact P (ref scratch, frame mx) and P from FP4 scores in the same frame: exp(sq + shift*scale - s_exact)
-          std::vector<double> pe(nrow), pk(nrow), pkq_only(nrow), pkk_only(nrow), pk2(nrow), pk8(nrow), pkh(nrow);
-          for (int j = 0; j < nrow; ++j) {
-            pe[j] = sc[j];
-            std::vector<double> kc(hd);
-            for (int e = 0; e < hd; ++e) kc[e] = __half2float(hk[((size_t)j * nkv + hkv) * hd + e]) - kmean[(size_t)hkv * hd + e];
-            blockq(kc.data(), hd, kg);
-            double sq = 0, sx = 0, sqo = 0, sko = 0, s2 = 0, s8 = 0, sh2 = 0;
-            for (int e = 0; e < hd; ++e) {
-              const double kx = __half2float(hk[((size_t)j * nkv + hkv) * hd + e]), km = kmean[(size_t)hkv * hd + e];
-              sq += qq[e] * kc[e], sx += q[e] * kx, sqo += qq[e] * (kx - km), sko += q[e] * kc[e];
-              s2 += q2[e] * kc[e], s8 += q8[e] * kc[e], sh2 += qh[e] * kc[e];
+          const double qr = std::max(qam, 1e-20) / 2688;
+          // P of the cold tiles from quantized scores: perm, residual channels, quantize Q / K
+          auto pscores = [&](const std::vector<int>& pm, int nres, bool qq_on, bool kq_on) {
+            std::vector<double> qp(hd), q1(hd), qe(hd), p(nrow);
+            for (int e = 0; e < hd; ++e) qp[e] = q[pm[e]];
+            q1 = qp;
+            blockq(q1.data(), hd, qr);
+            std::vector<double> res(hd);
+            for (int e = 0; e < hd; ++e) res[e] = qp[e] - q1[e];
+            blockq(res.data(), hd, qr);
+            for (int e = 0; e < hd; ++e) qe[e] = qq_on ? q1[e] + (e < nres ? res[e] : 0.0) : qp[e];
+            for (int j = 0; j < nrow; ++j) {
+              std::vector<double> kc(hd);
+              double sx = 0;
+              for (int e = 0; e < hd; ++e) {
+                const double kx = __half2float(hk[((size_t)j * nkv + hkv) * hd + pm[e]]);
+                kc[e] = kx - kmean[(size_t)hkv * hd + pm[e]];
+                sx += qp[e] * kx;
+              }
+              if (kq_on) blockq(kc.data(), hd, kg);
+              double sq = 0;
+              for (int e = 0; e < hd; ++e) sq += qe[e] * kc[e];
+              p[j] = sc[j] * std::exp((sq + shift - sx) * scale);
             }
-            pk[j] = sc[j] * std::exp((sq + shift - sx) * scale);
-            pkq_only[j] = sc[j] * std::exp((sqo + shift - sx) * scale);
-            pkk_only[j] = sc[j] * std::exp((sko + shift - sx) * scale);
-            pk2[j] = sc[j] * std::exp((s2 + shift - sx) * scale);
-            pk8[j] = sc[j] * std::exp((s8 + shift - sx) * scale);
-            pkh[j] = sc[j] * std::exp((sh2 + shift - sx) * scale);
-          }
-          auto pquant = [&](std::vector<double> p) {  // per 16 keys: 2^k >= max / 6, E2M1
+            return p;
+          };
+          auto e4m3up = [&](double x) {  // smallest UE4M3 value >= x (positive codes increase with the value)
+            auto dec = [](__nv_fp8_storage_t c) { return (double)__half2float(__half(__nv_cvt_fp8_to_halfraw(c, __NV_E4M3))); };
+            __nv_fp8_storage_t c = __nv_cvt_float_to_fp8((float)x, __NV_SATFINITE, __NV_E4M3);
+            if (dec(c) < x && c < 0x7E) ++c;
+            return dec(c);
+          };
+          // pass-1 P: frame fm = max over the cold tiles; per 16 keys scale value u = 256 gmax / fm in UE4M3, clamped to
+          // [2^-6, 448] (power of two; fine: UE4M3 rounded up), P = P' * u * fm / 1536 with P' in E2M1 (<= 6)
+          auto pquant = [&](std::vector<double> p, bool fine = false) {
+            double fm = 0;
+            for (int j = 0; j < nrow; ++j)
+              if (!((hm[wi * w.W + (j / 64) / 32] >> ((j / 64) % 32)) & 1u)) fm = std::max(fm, p[j]);
+            if (fm <= 0) return p;
             for (int g0 = 0; g0 < nrow; g0 += 16) {
               double gm = 0;
               for (int j = g0; j < std::min(nrow, g0 + 16); ++j) gm = std::max(gm, p[j]);
               if (gm <= 0) continue;
-              const double k2 = up2(gm / 6);
+              const double u = std::min(std::max(256 * gm / fm, 1.0 / 64), 448.0);
+              const double k2 = (fine ? e4m3up(u) : std::min(up2(u), 256.0)) * fm / 1536;
               for (int j = g0; j < std::min(nrow, g0 + 16); ++j) p[j] = e2m1(p[j] / k2) * k2;
             }
             return p;
           };
-          const std::vector<double> pq = pquant(pe), pkq = pquant(pk), pk2q = pquant(pk2), pk8q = pquant(pk8), pkhq = pquant(pkh);
-          // V per tile: channel e, 16-token groups in slot order (pass-1 Vt layout)
           std::vector<double> vq((size_t)nrow * hd);
           for (int t0 = 0; t0 < nrow; t0 += 64)
             for (int e = 0; e < hd; ++e)
@@ -571,7 +600,7 @@ int main(int argc, char** argv) {
             for (int j = 0; j < nrow; ++j) {
               const int t = j / 64;
               const bool hot = (hm[wi * w.W + t / 32] >> (t % 32)) & 1u;
-              const double pj = hot ? pe[j] : pc[j];
+              const double pj = hot ? (double)sc[j] : pc[j];
               l += pj;
               for (int e = 0; e < hd; ++e)
                 o[e] += pj * ((!hot && quant_v) ? vq[(size_t)j * hd + e] : __half2float(hv[((size_t)j * nkv + hkv) * hd + e]));
@@ -583,16 +612,29 @@ int main(int argc, char** argv) {
             }
             return d / std::sqrt(x * y);
           };
-          const double c[10] = {cs[i].first, out(pq, false), out(pe, true), out(pk, false), out(pkq, true),
-                                out(pkq_only, false), out(pkk_only, false), out(pk2q, true), out(pk8q, true),
-                                out(pkhq, true)};
-          for (int k = 0; k < 10; ++k) acc[k] += c[k] / 20;
-          std::printf("  errsrc %2d s %4d h %2d: kernel %.6f | P %.6f V %.6f QK %.6f all %.6f | Q only %.6f K only %.6f\n",
-                      i, s, h, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+          const std::vector<int> pa = order(hkv, false), pb = order(hkv, true);
+          const std::vector<double> p_a = pscores(pa, 64, true, true), p_b = pscores(pb, 64, true, true);
+          const std::vector<double> p_all = pscores(ident, hd, true, true);
+          const double c[NV] = {cs[i].first,
+                                out(pquant(pscores(ident, 0, true, true)), true),
+                                out(pquant(p_all), true),
+                                out(pquant(p_a), true),
+                                out(pquant(p_b), true),
+                                out(p_a, true),
+                                out(pquant(pscores(pa, 64, true, false)), true),
+                                out(pquant(p_a), false),
+                                out(pquant(pscores(pa, 64, false, true)), true),
+                                out(pquant(p_a, true), true),
+                                out(pquant(p_b, true), true),
+                                out(pquant(p_all, true), true)};
+          for (int k = 0; k < NV; ++k) acc[k] += c[k] / 20;
+          std::printf("  errsrc %2d s %4d h %2d:", i, s, h);
+          for (int k = 0; k < NV; ++k) std::printf(" %.6f", c[k]);
+          std::printf("\n");
         }
-        std::printf("errsrc mean of top 20: kernel %.6f | P only %.6f V only %.6f QK only %.6f all %.6f | Q only %.6f"
-                    " K only %.6f | all with Q 2xFP4 %.6f, Q FP8 %.6f, Q 2xFP4 on 64 ch %.6f\n", acc[0], acc[1], acc[2],
-                    acc[3], acc[4], acc[5], acc[6], acc[7], acc[8], acc[9]);
+        std::printf("errsrc mean of top 20:");
+        for (int k = 0; k < NV; ++k) std::printf(" | %s %.6f", names[k], acc[k]);
+        std::printf("\n");
       }
 #ifdef APA_DBG
       // diffuse-row fallback study: warps whose largest row FP4 cold share l_cold / lambda exceeds th (all tiles
