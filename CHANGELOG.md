@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 (2026-10-09)
 
-- Docs: imp prefill / PPL with 0.6.0 at eps 0.01 and 0.005 (relayed, kekzl/imp#2648). Llama-3.2-3B, 106451 tokens,
-  eps 0.005 default sparse prefill, means: 5359.98 -> 5666.82 ms vs 0.5.0; dense +0.6 %.
+- Prep: block scale search cheaper. Candidates {0, -1, 1, -2, 3, 4, 5, 6} code offsets (was -2 .. +6; +2 dropped), x
+  converted to f16x2 once, error per candidate from an F2FP round trip (`cvt.rn.satfinite.e2m1x2.f16x2`, one SASS
+  instruction). Cause (AUDIT.md, Phase 10): in imp sparse prefill (2048 queries on <= 26624 keys per call, about
+  1372 calls per 106451-token prompt) prep went 0.136 -> 0.186 ms per call; ncu: quant_kv 79.07 -> 130.59 us
+  (compute-bound), quant_q 12.42 -> 27.65 us. Now 0.170 ms per sparse call, 0.503 ms at 122880 keys (0.6.0: 0.530).
+- Accuracy, 12 dumps, eps 0.005: pairs < 0.99 905 (0.6.0: 910), worst min cos 0.984284 (0.6.0: 0.984354). KvState
+  last chunk, lc_122880_2: 0.985519 (0.6.0: 0.985671). Variants with 6 or 7 candidates or V without search: lc_122880_0
+  932 to 993 pairs < 0.99 (AUDIT.md, Phase 10). bench/test.sh: 115 ok.
+- imp eps 0.005 sparse +5.7 % (0.5.0 -> 0.6.0, kekzl/imp#2648): emulated per call (`APA_SPARSE=24576`, 9 dumps)
+  -0.9 to +6.5 %, no eps dependence; x 1372 calls -25 to +167 ms vs +306.84 ms measured, within the 235.66 ms spread
+  of the two 0.5.0 reps.
+- Bench: `APA_SPARSE=B` emulates one imp sparse prefill call (16-token pages, sink 16, recent 256, rest by max q.k of
+  16 sampled rows).
+- Docs: imp prefill / PPL with 0.6.0 at eps 0.01 and 0.005 (relayed, kekzl/imp#2648).
 
 ## 0.6.0 (2026-10-09)
 

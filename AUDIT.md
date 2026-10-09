@@ -352,3 +352,63 @@ Same run, 0.5.0 / -2 .. +6:
 Decision: -2 .. +6 (9 codes, f16x2 error ranking). Pairs < 0.99, 12 dumps: 1163 -> 910; worst min 0.980723 -> 0.984354;
 pairs < 0.9 at 8192 keys 1 -> 0. Mean cos lower on 3 of 14 (lc_122880_2 0.999833 -> 0.999775), min cos lower on 1 of 14
 (lc_122880_1 0.997516 -> 0.997481). Prep +0.010 to +0.045 ms; attention unchanged.
+
+## Phase 10: imp sparse prefill per call, cheaper block scale search
+
+Runs: PERF_LOG "Phase 10". imp (kekzl/imp#2648, relayed): Llama-3.2-3B, 106451 tokens, default sparse prefill, means of
+2, 0.5.0 -> 0.6.0: eps 0.005 5359.98 -> 5666.82 ms, eps 0.01 4976.07 -> 5043.07 ms; 0.5.0 reps at eps 0.005 differ by
+235.66 ms.
+
+imp call shape (imp source, read only): prefill chunk 2048, sparse budget 24576 past tokens for Llama (16-token pages,
+sink 16, recent 256, 16 sampled rows), `apa_min_kv` 8192: about 1372 APA calls of 2048 queries on <= 26624 keys.
+`APA_SPARSE=24576` emulates one call per dump: 1536 pages kept by max q.k over 16 sampled rows (rows merged by gap).
+
+Per call, 0.5.0 / 0.6.0, same bench source, min of 3 reps (hot %, attn ms, prep ms, delta attn + prep ms):
+
+| Dump | eps | hot | attn | prep | delta |
+|---|---|---|---|---|---|
+| lc_122880_0 | 0.005 | 28.9 / 28.4 | 1.815 / 1.747 | 0.136 / 0.186 | -0.018 |
+| lc_122880_0 | 0.01 | 15.7 / 15.8 | 1.370 / 1.344 | 0.136 / 0.186 | +0.024 |
+| lc_122880_1 | 0.005 | 28.4 / 28.5 | 1.714 / 1.700 | 0.135 / 0.186 | +0.037 |
+| lc_122880_1 | 0.01 | 17.9 / 17.9 | 1.475 / 1.482 | 0.136 / 0.186 | +0.057 |
+| lc_122880_2 | 0.005 | 17.9 / 18.4 | 1.682 / 1.694 | 0.136 / 0.187 | +0.063 |
+| lc_122880_2 | 0.01 | 11.0 / 11.3 | 1.515 / 1.523 | 0.137 / 0.186 | +0.057 |
+| lc_65536_0 | 0.005 | 41.7 / 41.7 | 2.143 / 2.169 | 0.136 / 0.187 | +0.077 |
+| lc_65536_0 | 0.01 | 21.0 / 20.9 | 1.470 / 1.451 | 0.137 / 0.187 | +0.031 |
+| lc_65536_1 | 0.005 | 27.0 / 26.7 | 1.743 / 1.734 | 0.136 / 0.186 | +0.041 |
+| lc_65536_1 | 0.01 | 15.8 / 15.5 | 1.497 / 1.483 | 0.137 / 0.187 | +0.036 |
+| lc_65536_2 | 0.005 | 17.6 / 18.2 | 1.672 / 1.722 | 0.137 / 0.188 | +0.101 |
+| lc_65536_2 | 0.01 | 10.2 / 10.5 | 1.480 / 1.521 | 0.137 / 0.188 | +0.092 |
+| lc_32768_0 | 0.005 | 47.6 / 47.5 | 2.323 / 2.311 | 0.136 / 0.186 | +0.038 |
+| lc_32768_0 | 0.01 | 21.4 / 21.3 | 1.595 / 1.561 | 0.136 / 0.187 | +0.017 |
+| lc_32768_1 | 0.005 | 28.3 / 28.1 | 1.811 / 1.790 | 0.135 / 0.185 | +0.029 |
+| lc_32768_1 | 0.01 | 16.4 / 16.1 | 1.493 / 1.482 | 0.136 / 0.186 | +0.039 |
+| lc_32768_2 | 0.005 | 20.1 / 21.0 | 1.745 / 1.817 | 0.136 / 0.186 | +0.122 |
+| lc_32768_2 | 0.01 | 11.2 / 11.8 | 1.534 / 1.573 | 0.136 / 0.187 | +0.090 |
+
+Per call 0.6.0 vs 0.5.0: -0.018 to +0.122 ms (-0.9 to +6.5 %), prep +0.050 ms on all 18, no eps dependence (lc_65536_2
++0.101 / +0.092 ms at 0.005 / 0.01). x 1372 calls: -25 to +167 ms, around the eps 0.01 imp delta (+67.00 ms); the eps
+0.005 imp delta (+306.84 ms) is within its rep spread. Accuracy per call vs FP32 (all pairs, rep 1), pairs < 0.99 over 9
+dumps: eps 0.005 138 -> 100, eps 0.01 4371 -> 3936; lc_122880_2 eps 0.01 min 0.986354 -> 0.974595 (5 pairs < 0.99).
+
+Prep kernels, ncu, lc_122880_0 sparse call, 0.5.0 / 0.6.0 (us): stats 74.08 / 75.07 (K + V 109 MB, DRAM-bound),
+finalize 3.78 / 3.81, quant_kv 79.07 / 130.59, quant_q 12.42 / 27.65. The search made quant_kv compute-bound.
+
+| Variant (code offsets, error ranking) | prep ms, sparse call | pairs < 0.99, lc_122880_0 |
+|---|---|---|
+| 0.5.0 (0) | 0.135 | 1115 |
+| 0.6.0 (-2 .. +6; f32 products, f16x2 error) | 0.185 | 893 |
+| 8: no +2 | 0.178 | 891 |
+| 7: no -2, +2 | 0.171 | 943 |
+| 6: 0, +-1, amax / 4 code and its +-1 | 0.167 | 932 |
+| 0.6.0, V nearest | 0.162 | 990 |
+| 6, V nearest | 0.152 | 993 |
+| -2 .. +6, x in f16x2, F2FP e2m1x2.f16x2 | 0.175 | 888 |
+| 8 (no +2), f16x2 (kept) | 0.169 | 887 |
+
+Other dumps within 1 pair for all variants. Decision: offsets {0, -1, 1, -2, 3, 4, 5, 6}, x converted to f16x2 once,
+error per candidate from an F2FP round trip (cvt.rn.satfinite.e2m1x2.f16x2, 1 SASS instruction). bench/test.sh
+REF = this build: 115 ok, default bitwise on 12 of 12. 12 dumps, eps 0.005: pairs < 0.99 905 (0.6.0: 910, 0.5.0: 1163),
+worst min 0.984284 (0.6.0: 0.984354). Prep at 122880 keys 0.503 ms (0.5.0 0.493, 0.6.0 0.530); per sparse call 0.170 ms
+(0.5.0 0.137, 0.6.0 0.185). Remaining per-call delta vs 0.5.0: prep +0.033 ms plus +0.6 to +0.9 points hot share on
+2 of 3 dumps (attn +0.039 to +0.070 ms).

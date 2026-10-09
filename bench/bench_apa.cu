@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -66,6 +67,25 @@ __global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, 
   }
 }
 
+// APA_SPARSE: S[r][b] = max over heads and the 16 keys of block b of q.k (sample row r), block b < nblk.
+__global__ void block_score_kernel(const T* Q, const T* K, const int* rows, int nr, int nblk, int H, int Hkv,
+                                   float* S) {
+  constexpr int D = 128;
+  const int b = blockIdx.x, G = H / Hkv;
+  for (int p = threadIdx.x; p < nr * H; p += blockDim.x) {
+    const int r = p / H, h = p % H;
+    const T* q = Q + ((size_t)rows[r] * H + h) * D;
+    float best = -INFINITY;
+    for (int j = b * 16; j < b * 16 + 16; ++j) {
+      const T* k = K + ((size_t)j * Hkv + h / G) * D;
+      float a = 0.f;
+      for (int d = 0; d < D; ++d) a += __half2float(q[d]) * __half2float(k[d]);
+      best = fmaxf(best, a);
+    }
+    atomicMax(reinterpret_cast<int*>(S) + (size_t)r * nblk + b, __float_as_int(best) ^ (best < 0 ? 0x7FFFFFFF : 0));
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: bench_apa dump.bin\n");
@@ -95,6 +115,59 @@ int main(int argc, char** argv) {
   CK(cudaMemcpy(Q, hq.data(), nq * 2, cudaMemcpyHostToDevice));
   CK(cudaMemcpy(K, hk.data(), nk * 2, cudaMemcpyHostToDevice));
   CK(cudaMemcpy(V, hv.data(), nk * 2, cudaMemcpyHostToDevice));
+  // APA_SPARSE=B: imp sparse prefill (attention.sparse_prefill_topk_tokens B): past [0, off) cut to B tokens of 16-key
+  // blocks, sink 16 / recent 256 tokens kept, the rest by score of 16 sampled Q rows (max q.k per block, rows merged
+  // by gap to each row's best block); keys = kept past blocks in order + the n chunk keys, Q rows at B.
+  if (const char* e = std::getenv("APA_SPARSE"); e != nullptr && (off + 15) / 16 > std::atoi(e) / 16) {
+    const int nblk = (off + 15) / 16, budget = std::atoi(e) / 16, nr = 16, recent = 16;
+    std::vector<int> rows(nr);
+    for (int r = 0; r < nr; ++r) rows[r] = (r + 1) * n / nr - 1;
+    int* drows;
+    float* dS;
+    CK(cudaMalloc(&drows, nr * 4));
+    CK(cudaMalloc(&dS, (size_t)nr * nblk * 4));
+    CK(cudaMemcpy(drows, rows.data(), nr * 4, cudaMemcpyHostToDevice));
+    std::vector<int> init((size_t)nr * nblk, (int)(0xFF800000u ^ 0x7FFFFFFFu));  // key of -inf
+    CK(cudaMemcpy(dS, init.data(), init.size() * 4, cudaMemcpyHostToDevice));
+    block_score_kernel<<<nblk, 256>>>(Q, K, drows, nr, nblk, nh, nkv, dS);
+    CK(cudaMemcpy(init.data(), dS, init.size() * 4, cudaMemcpyDeviceToHost));
+    std::vector<float> agg(nblk, INFINITY);
+    for (int r = 0; r < nr; ++r) {
+      std::vector<float> s(nblk);
+      float best = -INFINITY;
+      for (int b = 0; b < nblk; ++b) {
+        const int k = init[(size_t)r * nblk + b], u = k >= 0 ? k : k ^ 0x7FFFFFFF;
+        std::memcpy(&s[b], &u, 4);
+        best = std::max(best, s[b]);
+      }
+      for (int b = 0; b < nblk; ++b) agg[b] = std::min(agg[b], best - s[b]);
+    }
+    std::vector<int> mid;
+    for (int b = 1; b < nblk - recent; ++b) mid.push_back(b);
+    std::stable_sort(mid.begin(), mid.end(), [&](int a, int b) { return agg[a] < agg[b]; });
+    mid.resize(budget - 1 - recent);
+    std::vector<int> keep{0};
+    for (int b : mid) keep.push_back(b);
+    for (int b = nblk - recent; b < nblk; ++b) keep.push_back(b);
+    std::sort(keep.begin(), keep.end());
+    std::vector<T> sk, sv;  // compacted past (whole blocks, last block may be partial) + chunk keys
+    auto take = [&](int j0, int j1) {
+      sk.insert(sk.end(), hk.begin() + (size_t)j0 * nkv * hd, hk.begin() + (size_t)j1 * nkv * hd);
+      sv.insert(sv.end(), hv.begin() + (size_t)j0 * nkv * hd, hv.begin() + (size_t)j1 * nkv * hd);
+    };
+    for (int b : keep) take(b * 16, std::min(off, b * 16 + 16));
+    const int past = (int)(sk.size() / ((size_t)nkv * hd));
+    take(off, kv);
+    std::printf("sparse: past %d -> %d tokens (%zu of %d blocks), keys %d\n", off, past, keep.size(), nblk,
+                past + n);
+    std::copy(sk.begin(), sk.end(), hk.begin());
+    std::copy(sv.begin(), sv.end(), hv.begin());
+    off = past, kv = past + n;
+    CK(cudaMemcpy(K, hk.data(), (size_t)kv * nkv * hd * 2, cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(V, hv.data(), (size_t)kv * nkv * hd * 2, cudaMemcpyHostToDevice));
+    CK(cudaFree(drows));
+    CK(cudaFree(dS));
+  }
   const float scale = 1.f / std::sqrt(128.f);
 
   // reference rows
@@ -480,7 +553,7 @@ int main(int argc, char** argv) {
             int cb = c0;
             if (mse && am > 0) {
               double best = 1e300;
-              for (int off : {0, -1, 1, -2, 2, 3, 4, 5, 6}) {
+              for (int off : {0, -1, 1, -2, 3, 4, 5, 6}) {
                 const int c = c0 + off;
                 if (c < 1 || c > 0x7E) continue;
                 const double sc = std::max(dec8(c), 1.0 / 512);

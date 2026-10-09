@@ -2892,3 +2892,454 @@ Note: eps 0.005 sparse +5.7 % (means) is more than the prep delta you measured; 
 
 Hot share, 0.5.0 -> 0.6.0, same run (Phase 9, qs4): lc_122880_2 first 8192 keys 17.0 -> 19.2 %, first 4096 keys
 19.2 -> 21.0 %, ra2dump_59 61.2 -> 66.8 %, ra2dump_78 60.2 -> 63.8 %, lc_32768_2 17.1 -> 18.2 %.
+
+## 2026-10-09 Phase 10: imp sparse prefill per call, cheaper block scale search (main 835c599 + changes)
+
+APA_SPARSE=24576 per call, b050s = v0.5.0 headers, b060s = 0.6.0, same bench source (sp1/sp.txt):
+
+```
+lc_122880_0 b050s eps 0.005 rep 1 rc 0: hot 28.9 % p2load 43.0 % attn 1.815 ms pass2 1.238 prep 0.136 ms | mean cos 0.999411 min 0.984573 cos<0.99 122 cos<0.9 0 
+lc_122880_0 b060s eps 0.005 rep 1 rc 0: hot 28.4 % p2load 41.9 % attn 1.750 ms pass2 1.171 prep 0.186 ms | mean cos 0.999440 min 0.984399 cos<0.99 96 cos<0.9 0 
+lc_122880_0 b050s eps 0.005 rep 2 rc 0: hot 28.9 % p2load 43.0 % attn 1.908 ms pass2 1.240 prep 0.136 ms | 
+lc_122880_0 b060s eps 0.005 rep 2 rc 0: hot 28.4 % p2load 41.9 % attn 1.747 ms pass2 1.175 prep 0.186 ms | 
+lc_122880_0 b050s eps 0.005 rep 3 rc 0: hot 28.9 % p2load 43.0 % attn 1.816 ms pass2 1.242 prep 0.137 ms | 
+lc_122880_0 b060s eps 0.005 rep 3 rc 0: hot 28.4 % p2load 41.9 % attn 1.747 ms pass2 1.169 prep 0.187 ms | 
+lc_122880_0 b050s eps 0.01 rep 1 rc 0: hot 15.7 % p2load 23.6 % attn 1.373 ms pass2 0.665 prep 0.136 ms | mean cos 0.998575 min 0.976859 cos<0.99 2075 cos<0.9 0 
+lc_122880_0 b060s eps 0.01 rep 1 rc 0: hot 15.8 % p2load 23.0 % attn 1.346 ms pass2 0.642 prep 0.186 ms | mean cos 0.998660 min 0.976902 cos<0.99 2040 cos<0.9 0 
+lc_122880_0 b050s eps 0.01 rep 2 rc 0: hot 15.7 % p2load 23.6 % attn 1.370 ms pass2 0.662 prep 0.137 ms | 
+lc_122880_0 b060s eps 0.01 rep 2 rc 0: hot 15.8 % p2load 23.0 % attn 1.344 ms pass2 0.641 prep 0.186 ms | 
+lc_122880_0 b050s eps 0.01 rep 3 rc 0: hot 15.7 % p2load 23.6 % attn 1.374 ms pass2 0.665 prep 0.136 ms | 
+lc_122880_0 b060s eps 0.01 rep 3 rc 0: hot 15.8 % p2load 23.0 % attn 1.349 ms pass2 0.639 prep 0.187 ms | 
+lc_122880_1 b050s eps 0.005 rep 1 rc 0: hot 28.4 % p2load 65.4 % attn 1.725 ms pass2 1.124 prep 0.137 ms | mean cos 0.999980 min 0.999131 cos<0.99 0 cos<0.9 0 
+lc_122880_1 b060s eps 0.005 rep 1 rc 0: hot 28.5 % p2load 65.5 % attn 1.709 ms pass2 1.122 prep 0.188 ms | mean cos 0.999982 min 0.999124 cos<0.99 0 cos<0.9 0 
+lc_122880_1 b050s eps 0.005 rep 2 rc 0: hot 28.4 % p2load 65.4 % attn 1.715 ms pass2 1.126 prep 0.135 ms | 
+lc_122880_1 b060s eps 0.005 rep 2 rc 0: hot 28.5 % p2load 65.5 % attn 1.703 ms pass2 1.124 prep 0.193 ms | 
+lc_122880_1 b050s eps 0.005 rep 3 rc 0: hot 28.4 % p2load 65.4 % attn 1.714 ms pass2 1.127 prep 0.136 ms | 
+lc_122880_1 b060s eps 0.005 rep 3 rc 0: hot 28.5 % p2load 65.5 % attn 1.700 ms pass2 1.123 prep 0.186 ms | 
+lc_122880_1 b050s eps 0.01 rep 1 rc 0: hot 17.9 % p2load 49.7 % attn 1.478 ms pass2 0.807 prep 0.136 ms | mean cos 0.999966 min 0.998196 cos<0.99 0 cos<0.9 0 
+lc_122880_1 b060s eps 0.01 rep 1 rc 0: hot 17.9 % p2load 49.7 % attn 1.485 ms pass2 0.817 prep 0.186 ms | mean cos 0.999973 min 0.998439 cos<0.99 0 cos<0.9 0 
+lc_122880_1 b050s eps 0.01 rep 2 rc 0: hot 17.9 % p2load 49.7 % attn 1.482 ms pass2 0.805 prep 0.136 ms | 
+lc_122880_1 b060s eps 0.01 rep 2 rc 0: hot 17.9 % p2load 49.7 % attn 1.482 ms pass2 0.820 prep 0.187 ms | 
+lc_122880_1 b050s eps 0.01 rep 3 rc 0: hot 17.9 % p2load 49.7 % attn 1.475 ms pass2 0.802 prep 0.136 ms | 
+lc_122880_1 b060s eps 0.01 rep 3 rc 0: hot 17.9 % p2load 49.7 % attn 1.483 ms pass2 0.822 prep 0.188 ms | 
+lc_122880_2 b050s eps 0.005 rep 1 rc 0: hot 17.9 % p2load 38.8 % attn 1.689 ms pass2 0.874 prep 0.136 ms | mean cos 0.999923 min 0.994640 cos<0.99 0 cos<0.9 0 
+lc_122880_2 b060s eps 0.005 rep 1 rc 0: hot 18.4 % p2load 39.8 % attn 1.698 ms pass2 0.870 prep 0.187 ms | mean cos 0.999923 min 0.995921 cos<0.99 0 cos<0.9 0 
+lc_122880_2 b050s eps 0.005 rep 2 rc 0: hot 17.9 % p2load 38.8 % attn 1.682 ms pass2 0.870 prep 0.136 ms | 
+lc_122880_2 b060s eps 0.005 rep 2 rc 0: hot 18.4 % p2load 39.8 % attn 1.694 ms pass2 0.870 prep 0.191 ms | 
+lc_122880_2 b050s eps 0.005 rep 3 rc 0: hot 17.9 % p2load 38.8 % attn 1.684 ms pass2 0.871 prep 0.136 ms | 
+lc_122880_2 b060s eps 0.005 rep 3 rc 0: hot 18.4 % p2load 39.8 % attn 1.702 ms pass2 0.872 prep 0.187 ms | 
+lc_122880_2 b050s eps 0.01 rep 1 rc 0: hot 11.0 % p2load 29.2 % attn 1.515 ms pass2 0.691 prep 0.137 ms | mean cos 0.999868 min 0.986354 cos<0.99 3 cos<0.9 0 
+lc_122880_2 b060s eps 0.01 rep 1 rc 0: hot 11.3 % p2load 29.9 % attn 1.523 ms pass2 0.681 prep 0.186 ms | mean cos 0.999881 min 0.974595 cos<0.99 5 cos<0.9 0 
+lc_122880_2 b050s eps 0.01 rep 2 rc 0: hot 11.0 % p2load 29.2 % attn 1.518 ms pass2 0.689 prep 0.138 ms | 
+lc_122880_2 b060s eps 0.01 rep 2 rc 0: hot 11.3 % p2load 29.9 % attn 1.528 ms pass2 0.675 prep 0.186 ms | 
+lc_122880_2 b050s eps 0.01 rep 3 rc 0: hot 11.0 % p2load 29.2 % attn 1.516 ms pass2 0.691 prep 0.137 ms | 
+lc_122880_2 b060s eps 0.01 rep 3 rc 0: hot 11.3 % p2load 29.9 % attn 1.534 ms pass2 0.688 prep 0.187 ms | 
+lc_65536_0 b050s eps 0.005 rep 1 rc 0: hot 41.7 % p2load 57.2 % attn 2.145 ms pass2 1.488 prep 0.148 ms | mean cos 0.999505 min 0.988271 cos<0.99 12 cos<0.9 0 
+lc_65536_0 b060s eps 0.005 rep 1 rc 0: hot 41.7 % p2load 57.0 % attn 2.175 ms pass2 1.496 prep 0.187 ms | mean cos 0.999535 min 0.989338 cos<0.99 4 cos<0.9 0 
+lc_65536_0 b050s eps 0.005 rep 2 rc 0: hot 41.7 % p2load 57.2 % attn 2.143 ms pass2 1.489 prep 0.136 ms | 
+lc_65536_0 b060s eps 0.005 rep 2 rc 0: hot 41.7 % p2load 57.0 % attn 2.169 ms pass2 1.495 prep 0.188 ms | 
+lc_65536_0 b050s eps 0.005 rep 3 rc 0: hot 41.7 % p2load 57.2 % attn 2.150 ms pass2 1.489 prep 0.138 ms | 
+lc_65536_0 b060s eps 0.005 rep 3 rc 0: hot 41.7 % p2load 57.0 % attn 2.175 ms pass2 1.497 prep 0.195 ms | 
+lc_65536_0 b050s eps 0.01 rep 1 rc 0: hot 21.0 % p2load 33.6 % attn 1.476 ms pass2 0.849 prep 0.137 ms | mean cos 0.998476 min 0.958309 cos<0.99 1749 cos<0.9 0 
+lc_65536_0 b060s eps 0.01 rep 1 rc 0: hot 20.9 % p2load 33.1 % attn 1.451 ms pass2 0.826 prep 0.188 ms | mean cos 0.998542 min 0.963792 cos<0.99 1738 cos<0.9 0 
+lc_65536_0 b050s eps 0.01 rep 2 rc 0: hot 21.0 % p2load 33.6 % attn 1.475 ms pass2 0.846 prep 0.137 ms | 
+lc_65536_0 b060s eps 0.01 rep 2 rc 0: hot 20.9 % p2load 33.1 % attn 1.453 ms pass2 0.829 prep 0.188 ms | 
+lc_65536_0 b050s eps 0.01 rep 3 rc 0: hot 21.0 % p2load 33.6 % attn 1.470 ms pass2 0.848 prep 0.138 ms | 
+lc_65536_0 b060s eps 0.01 rep 3 rc 0: hot 20.9 % p2load 33.1 % attn 1.452 ms pass2 0.822 prep 0.187 ms | 
+lc_65536_1 b050s eps 0.005 rep 1 rc 0: hot 27.0 % p2load 61.1 % attn 1.743 ms pass2 1.057 prep 0.136 ms | mean cos 0.999978 min 0.998690 cos<0.99 0 cos<0.9 0 
+lc_65536_1 b060s eps 0.005 rep 1 rc 0: hot 26.7 % p2load 60.9 % attn 1.734 ms pass2 1.034 prep 0.189 ms | mean cos 0.999981 min 0.998870 cos<0.99 0 cos<0.9 0 
+lc_65536_1 b050s eps 0.005 rep 2 rc 0: hot 27.0 % p2load 61.1 % attn 1.743 ms pass2 1.051 prep 0.136 ms | 
+lc_65536_1 b060s eps 0.005 rep 2 rc 0: hot 26.7 % p2load 60.9 % attn 1.751 ms pass2 1.024 prep 0.190 ms | 
+lc_65536_1 b050s eps 0.005 rep 3 rc 0: hot 27.0 % p2load 61.1 % attn 1.756 ms pass2 1.055 prep 0.139 ms | 
+lc_65536_1 b060s eps 0.005 rep 3 rc 0: hot 26.7 % p2load 60.9 % attn 1.738 ms pass2 1.032 prep 0.186 ms | 
+lc_65536_1 b050s eps 0.01 rep 1 rc 0: hot 15.8 % p2load 44.2 % attn 1.503 ms pass2 0.729 prep 0.137 ms | mean cos 0.999964 min 0.997449 cos<0.99 0 cos<0.9 0 
+lc_65536_1 b060s eps 0.01 rep 1 rc 0: hot 15.5 % p2load 43.8 % attn 1.485 ms pass2 0.720 prep 0.189 ms | mean cos 0.999972 min 0.998899 cos<0.99 0 cos<0.9 0 
+lc_65536_1 b050s eps 0.01 rep 2 rc 0: hot 15.8 % p2load 44.2 % attn 1.497 ms pass2 0.732 prep 0.138 ms | 
+lc_65536_1 b060s eps 0.01 rep 2 rc 0: hot 15.5 % p2load 43.8 % attn 1.483 ms pass2 0.717 prep 0.188 ms | 
+lc_65536_1 b050s eps 0.01 rep 3 rc 0: hot 15.8 % p2load 44.2 % attn 1.502 ms pass2 0.729 prep 0.138 ms | 
+lc_65536_1 b060s eps 0.01 rep 3 rc 0: hot 15.5 % p2load 43.8 % attn 1.483 ms pass2 0.718 prep 0.187 ms | 
+lc_65536_2 b050s eps 0.005 rep 1 rc 0: hot 17.6 % p2load 37.0 % attn 1.672 ms pass2 0.851 prep 0.137 ms | mean cos 0.999918 min 0.989416 cos<0.99 1 cos<0.9 0 
+lc_65536_2 b060s eps 0.005 rep 1 rc 0: hot 18.2 % p2load 38.1 % attn 1.723 ms pass2 0.910 prep 0.188 ms | mean cos 0.999920 min 0.994370 cos<0.99 0 cos<0.9 0 
+lc_65536_2 b050s eps 0.005 rep 2 rc 0: hot 17.6 % p2load 37.0 % attn 1.676 ms pass2 0.856 prep 0.137 ms | 
+lc_65536_2 b060s eps 0.005 rep 2 rc 0: hot 18.2 % p2load 38.1 % attn 1.722 ms pass2 0.914 prep 0.188 ms | 
+lc_65536_2 b050s eps 0.005 rep 3 rc 0: hot 17.6 % p2load 37.0 % attn 1.677 ms pass2 0.857 prep 0.137 ms | 
+lc_65536_2 b060s eps 0.005 rep 3 rc 0: hot 18.2 % p2load 38.1 % attn 1.724 ms pass2 0.908 prep 0.188 ms | 
+lc_65536_2 b050s eps 0.01 rep 1 rc 0: hot 10.2 % p2load 26.6 % attn 1.480 ms pass2 0.675 prep 0.139 ms | mean cos 0.999856 min 0.985381 cos<0.99 3 cos<0.9 0 
+lc_65536_2 b060s eps 0.01 rep 1 rc 0: hot 10.5 % p2load 27.1 % attn 1.521 ms pass2 0.677 prep 0.188 ms | mean cos 0.999880 min 0.993326 cos<0.99 0 cos<0.9 0 
+lc_65536_2 b050s eps 0.01 rep 2 rc 0: hot 10.2 % p2load 26.6 % attn 1.485 ms pass2 0.669 prep 0.138 ms | 
+lc_65536_2 b060s eps 0.01 rep 2 rc 0: hot 10.5 % p2load 27.1 % attn 1.525 ms pass2 0.675 prep 0.188 ms | 
+lc_65536_2 b050s eps 0.01 rep 3 rc 0: hot 10.2 % p2load 26.6 % attn 1.489 ms pass2 0.672 prep 0.137 ms | 
+lc_65536_2 b060s eps 0.01 rep 3 rc 0: hot 10.5 % p2load 27.1 % attn 1.521 ms pass2 0.676 prep 0.188 ms | 
+lc_32768_0 b050s eps 0.005 rep 1 rc 0: hot 47.6 % p2load 66.8 % attn 2.331 ms pass2 1.578 prep 0.137 ms | mean cos 0.999750 min 0.991180 cos<0.99 0 cos<0.9 0 
+lc_32768_0 b060s eps 0.005 rep 1 rc 0: hot 47.5 % p2load 66.5 % attn 2.323 ms pass2 1.562 prep 0.187 ms | mean cos 0.999795 min 0.993714 cos<0.99 0 cos<0.9 0 
+lc_32768_0 b050s eps 0.005 rep 2 rc 0: hot 47.6 % p2load 66.8 % attn 2.323 ms pass2 1.579 prep 0.136 ms | 
+lc_32768_0 b060s eps 0.005 rep 2 rc 0: hot 47.5 % p2load 66.5 % attn 2.317 ms pass2 1.560 prep 0.186 ms | 
+lc_32768_0 b050s eps 0.005 rep 3 rc 0: hot 47.6 % p2load 66.8 % attn 2.325 ms pass2 1.575 prep 0.136 ms | 
+lc_32768_0 b060s eps 0.005 rep 3 rc 0: hot 47.5 % p2load 66.5 % attn 2.311 ms pass2 1.560 prep 0.187 ms | 
+lc_32768_0 b050s eps 0.01 rep 1 rc 0: hot 21.4 % p2load 35.8 % attn 1.596 ms pass2 0.882 prep 0.137 ms | mean cos 0.998940 min 0.972839 cos<0.99 525 cos<0.9 0 
+lc_32768_0 b060s eps 0.01 rep 1 rc 0: hot 21.3 % p2load 35.2 % attn 1.562 ms pass2 0.846 prep 0.188 ms | mean cos 0.999120 min 0.980893 cos<0.99 143 cos<0.9 0 
+lc_32768_0 b050s eps 0.01 rep 2 rc 0: hot 21.4 % p2load 35.8 % attn 1.600 ms pass2 0.877 prep 0.136 ms | 
+lc_32768_0 b060s eps 0.01 rep 2 rc 0: hot 21.3 % p2load 35.2 % attn 1.561 ms pass2 0.845 prep 0.187 ms | 
+lc_32768_0 b050s eps 0.01 rep 3 rc 0: hot 21.4 % p2load 35.8 % attn 1.595 ms pass2 0.883 prep 0.136 ms | 
+lc_32768_0 b060s eps 0.01 rep 3 rc 0: hot 21.3 % p2load 35.2 % attn 1.571 ms pass2 0.844 prep 0.193 ms | 
+lc_32768_1 b050s eps 0.005 rep 1 rc 0: hot 28.3 % p2load 66.6 % attn 1.815 ms pass2 1.195 prep 0.135 ms | mean cos 0.999975 min 0.998629 cos<0.99 0 cos<0.9 0 
+lc_32768_1 b060s eps 0.005 rep 1 rc 0: hot 28.1 % p2load 66.4 % attn 1.794 ms pass2 1.183 prep 0.185 ms | mean cos 0.999977 min 0.998650 cos<0.99 0 cos<0.9 0 
+lc_32768_1 b050s eps 0.005 rep 2 rc 0: hot 28.3 % p2load 66.6 % attn 1.812 ms pass2 1.197 prep 0.138 ms | 
+lc_32768_1 b060s eps 0.005 rep 2 rc 0: hot 28.1 % p2load 66.4 % attn 1.790 ms pass2 1.179 prep 0.188 ms | 
+lc_32768_1 b050s eps 0.005 rep 3 rc 0: hot 28.3 % p2load 66.6 % attn 1.811 ms pass2 1.194 prep 0.135 ms | 
+lc_32768_1 b060s eps 0.005 rep 3 rc 0: hot 28.1 % p2load 66.4 % attn 1.794 ms pass2 1.182 prep 0.188 ms | 
+lc_32768_1 b050s eps 0.01 rep 1 rc 0: hot 16.4 % p2load 46.7 % attn 1.497 ms pass2 0.806 prep 0.137 ms | mean cos 0.999959 min 0.996639 cos<0.99 0 cos<0.9 0 
+lc_32768_1 b060s eps 0.01 rep 1 rc 0: hot 16.1 % p2load 46.2 % attn 1.485 ms pass2 0.805 prep 0.186 ms | mean cos 0.999967 min 0.998257 cos<0.99 0 cos<0.9 0 
+lc_32768_1 b050s eps 0.01 rep 2 rc 0: hot 16.4 % p2load 46.7 % attn 1.493 ms pass2 0.813 prep 0.136 ms | 
+lc_32768_1 b060s eps 0.01 rep 2 rc 0: hot 16.1 % p2load 46.2 % attn 1.482 ms pass2 0.807 prep 0.188 ms | 
+lc_32768_1 b050s eps 0.01 rep 3 rc 0: hot 16.4 % p2load 46.7 % attn 1.496 ms pass2 0.814 prep 0.138 ms | 
+lc_32768_1 b060s eps 0.01 rep 3 rc 0: hot 16.1 % p2load 46.2 % attn 1.486 ms pass2 0.803 prep 0.186 ms | 
+lc_32768_2 b050s eps 0.005 rep 1 rc 0: hot 20.1 % p2load 43.0 % attn 1.745 ms pass2 0.985 prep 0.137 ms | mean cos 0.999905 min 0.988140 cos<0.99 3 cos<0.9 0 
+lc_32768_2 b060s eps 0.005 rep 1 rc 0: hot 21.0 % p2load 43.7 % attn 1.823 ms pass2 1.027 prep 0.187 ms | mean cos 0.999901 min 0.994116 cos<0.99 0 cos<0.9 0 
+lc_32768_2 b050s eps 0.005 rep 2 rc 0: hot 20.1 % p2load 43.0 % attn 1.749 ms pass2 0.992 prep 0.136 ms | 
+lc_32768_2 b060s eps 0.005 rep 2 rc 0: hot 21.0 % p2load 43.7 % attn 1.817 ms pass2 1.027 prep 0.186 ms | 
+lc_32768_2 b050s eps 0.005 rep 3 rc 0: hot 20.1 % p2load 43.0 % attn 1.750 ms pass2 0.991 prep 0.137 ms | 
+lc_32768_2 b060s eps 0.005 rep 3 rc 0: hot 21.0 % p2load 43.7 % attn 1.824 ms pass2 1.032 prep 0.186 ms | 
+lc_32768_2 b050s eps 0.01 rep 1 rc 0: hot 11.2 % p2load 30.4 % attn 1.537 ms pass2 0.751 prep 0.137 ms | mean cos 0.999825 min 0.950066 cos<0.99 16 cos<0.9 0 
+lc_32768_2 b060s eps 0.01 rep 1 rc 0: hot 11.8 % p2load 31.2 % attn 1.573 ms pass2 0.762 prep 0.187 ms | mean cos 0.999852 min 0.960551 cos<0.99 10 cos<0.9 0 
+lc_32768_2 b050s eps 0.01 rep 2 rc 0: hot 11.2 % p2load 30.4 % attn 1.538 ms pass2 0.752 prep 0.136 ms | 
+lc_32768_2 b060s eps 0.01 rep 2 rc 0: hot 11.8 % p2load 31.2 % attn 1.574 ms pass2 0.764 prep 0.188 ms | 
+lc_32768_2 b050s eps 0.01 rep 3 rc 0: hot 11.2 % p2load 30.4 % attn 1.534 ms pass2 0.756 prep 0.137 ms | 
+lc_32768_2 b060s eps 0.01 rep 3 rc 0: hot 11.8 % p2load 31.2 % attn 1.575 ms pass2 0.763 prep 0.187 ms | 
+sparse: past 120832 -> 24576 tokens (1536 of 7552 blocks), keys 26624
+sparse: past 120832 -> 24576 tokens (1536 of 7552 blocks), keys 26624
+sparse: past 120832 -> 24576 tokens (1536 of 7552 blocks), keys 26624
+sparse: past 30720 -> 24576 tokens (1536 of 1920 blocks), keys 26624
+sparse: past 30720 -> 24576 tokens (1536 of 1920 blocks), keys 26624
+sparse: past 30720 -> 24576 tokens (1536 of 1920 blocks), keys 26624
+sparse: past 63488 -> 24576 tokens (1536 of 3968 blocks), keys 26624
+sparse: past 63488 -> 24576 tokens (1536 of 3968 blocks), keys 26624
+sparse: past 63488 -> 24576 tokens (1536 of 3968 blocks), keys 26624
+```
+
+ncu gpu__time_duration.sum, lc_122880_0 sparse call, first prep (prof/*.ncu):
+
+```
+### b050s
+ void stats_kernel<128, FlatKV<__half>>(T2, Dims, unsigned int *, float *, const int *, in
+ gpu__time_duration.sum us 74.08
+ void finalize_stats_kernel<128>(const unsigned int *, const float *, int, float *, HeadSc
+ gpu__time_duration.sum us 3.78
+ void quant_kv_kernel<128, FlatKV<__half>>(T2, Dims, const float *, const HeadScale *, uns
+ gpu__time_duration.sum us 79.07
+ void quant_q_kernel<128, __half>(const T2 *, Dims, float, unsigned char *, unsigned char 
+ gpu__time_duration.sum us 12.42
+### b_k9
+ void stats_kernel<128, FlatKV<__half>>(T2, Dims, unsigned int *, float *, const int *, in
+ gpu__time_duration.sum us 75.07
+ void finalize_stats_kernel<128>(const unsigned int *, const float *, int, float *, HeadSc
+ gpu__time_duration.sum us 3.81
+ void quant_kv_kernel<128, FlatKV<__half>>(T2, Dims, const float *, const HeadScale *, uns
+ gpu__time_duration.sum us 130.59
+ void quant_q_kernel<128, __half>(const T2 *, Dims, float, unsigned char *, unsigned char 
+ gpu__time_duration.sum us 27.65
+```
+
+Candidate variants, prep per sparse call (qs5 / qs6 / qs7 prep.txt) and accuracy (sw.txt):
+
+```
+### qs5
+lc_122880_0 b_050s rep 1: hot 28.9 % attn 1.804 ms prep 0.136 ms 
+lc_122880_0 b_k9 rep 1: hot 28.4 % attn 1.737 ms prep 0.186 ms 
+lc_122880_0 b_k8 rep 1: hot 28.4 % attn 1.743 ms prep 0.179 ms 
+lc_122880_0 b_k7 rep 1: hot 28.4 % attn 1.733 ms prep 0.171 ms 
+lc_122880_0 b_k6 rep 1: hot 28.2 % attn 1.746 ms prep 0.168 ms 
+lc_122880_0 b_k9v rep 1: hot 28.4 % attn 1.742 ms prep 0.163 ms 
+lc_122880_0 b_k6v rep 1: hot 28.2 % attn 1.738 ms prep 0.153 ms 
+lc_122880_0 b_050s rep 2: hot 28.9 % attn 1.799 ms prep 0.136 ms 
+lc_122880_0 b_k9 rep 2: hot 28.4 % attn 1.738 ms prep 0.185 ms 
+lc_122880_0 b_k8 rep 2: hot 28.4 % attn 1.733 ms prep 0.180 ms 
+lc_122880_0 b_k7 rep 2: hot 28.4 % attn 1.733 ms prep 0.172 ms 
+lc_122880_0 b_k6 rep 2: hot 28.2 % attn 1.737 ms prep 0.167 ms 
+lc_122880_0 b_k9v rep 2: hot 28.4 % attn 1.739 ms prep 0.162 ms 
+lc_122880_0 b_k6v rep 2: hot 28.2 % attn 1.742 ms prep 0.155 ms 
+lc_122880_0 b_050s rep 3: hot 28.9 % attn 1.798 ms prep 0.135 ms 
+lc_122880_0 b_k9 rep 3: hot 28.4 % attn 1.740 ms prep 0.186 ms 
+lc_122880_0 b_k8 rep 3: hot 28.4 % attn 1.736 ms prep 0.178 ms 
+lc_122880_0 b_k7 rep 3: hot 28.4 % attn 1.736 ms prep 0.171 ms 
+lc_122880_0 b_k6 rep 3: hot 28.2 % attn 1.744 ms prep 0.168 ms 
+lc_122880_0 b_k9v rep 3: hot 28.4 % attn 1.736 ms prep 0.163 ms 
+lc_122880_0 b_k6v rep 3: hot 28.2 % attn 1.744 ms prep 0.152 ms 
+lc_65536_2 b_050s rep 1: hot 17.6 % attn 1.665 ms prep 0.136 ms 
+lc_65536_2 b_k9 rep 1: hot 18.2 % attn 1.708 ms prep 0.187 ms 
+lc_65536_2 b_k8 rep 1: hot 18.2 % attn 1.705 ms prep 0.181 ms 
+lc_65536_2 b_k7 rep 1: hot 18.2 % attn 1.715 ms prep 0.173 ms 
+lc_65536_2 b_k6 rep 1: hot 18.2 % attn 1.712 ms prep 0.169 ms 
+lc_65536_2 b_k9v rep 1: hot 18.2 % attn 1.709 ms prep 0.164 ms 
+lc_65536_2 b_k6v rep 1: hot 18.2 % attn 1.709 ms prep 0.152 ms 
+lc_65536_2 b_050s rep 2: hot 17.6 % attn 1.664 ms prep 0.137 ms 
+lc_65536_2 b_k9 rep 2: hot 18.2 % attn 1.706 ms prep 0.187 ms 
+lc_65536_2 b_k8 rep 2: hot 18.2 % attn 1.712 ms prep 0.179 ms 
+lc_65536_2 b_k7 rep 2: hot 18.2 % attn 1.706 ms prep 0.173 ms 
+lc_65536_2 b_k6 rep 2: hot 18.2 % attn 1.713 ms prep 0.169 ms 
+lc_65536_2 b_k9v rep 2: hot 18.2 % attn 1.707 ms prep 0.163 ms 
+lc_65536_2 b_k6v rep 2: hot 18.2 % attn 1.709 ms prep 0.153 ms 
+lc_65536_2 b_050s rep 3: hot 17.6 % attn 1.665 ms prep 0.136 ms 
+lc_65536_2 b_k9 rep 3: hot 18.2 % attn 1.705 ms prep 0.189 ms 
+lc_65536_2 b_k8 rep 3: hot 18.2 % attn 1.709 ms prep 0.178 ms 
+lc_65536_2 b_k7 rep 3: hot 18.2 % attn 1.705 ms prep 0.172 ms 
+lc_65536_2 b_k6 rep 3: hot 18.2 % attn 1.715 ms prep 0.167 ms 
+lc_65536_2 b_k9v rep 3: hot 18.2 % attn 1.708 ms prep 0.163 ms 
+lc_65536_2 b_k6v rep 3: hot 18.2 % attn 1.712 ms prep 0.152 ms 
+lc_122880_0_b_k9 rc 0: hot 10.1 % attn 5.390 ms prep 0.523 ms | mean cos 0.999117 min 0.984354 cos<0.99 893 cos<0.9 0 
+lc_122880_0_b_k8 rc 0: hot 10.1 % attn 5.389 ms prep 0.506 ms | mean cos 0.999116 min 0.984309 cos<0.99 891 cos<0.9 0 
+lc_122880_0_b_k7 rc 0: hot 10.1 % attn 5.339 ms prep 0.505 ms | mean cos 0.999112 min 0.984249 cos<0.99 943 cos<0.9 0 
+lc_122880_0_b_k6 rc 0: hot 10.1 % attn 5.362 ms prep 0.502 ms | mean cos 0.999112 min 0.984159 cos<0.99 932 cos<0.9 0 
+lc_122880_0_b_k9v rc 0: hot 10.1 % attn 5.380 ms prep 0.496 ms | mean cos 0.999103 min 0.983558 cos<0.99 990 cos<0.9 0 
+lc_122880_0_b_k6v rc 0: hot 10.1 % attn 5.416 ms prep 0.493 ms | mean cos 0.999102 min 0.983544 cos<0.99 993 cos<0.9 0 
+lc_122880_2_b_k9 rc 0: hot 5.9 % attn 5.776 ms prep 0.524 ms | mean cos 0.999775 min 0.987727 cos<0.99 3 cos<0.9 0 
+lc_122880_2_b_k8 rc 0: hot 5.9 % attn 5.829 ms prep 0.506 ms | mean cos 0.999775 min 0.987798 cos<0.99 3 cos<0.9 0 
+lc_122880_2_b_k7 rc 0: hot 5.9 % attn 5.779 ms prep 0.504 ms | mean cos 0.999783 min 0.988065 cos<0.99 2 cos<0.9 0 
+lc_122880_2_b_k6 rc 0: hot 5.9 % attn 5.815 ms prep 0.502 ms | mean cos 0.999789 min 0.988538 cos<0.99 2 cos<0.9 0 
+lc_122880_2_b_k9v rc 0: hot 5.9 % attn 5.771 ms prep 0.495 ms | mean cos 0.999774 min 0.987805 cos<0.99 3 cos<0.9 0 
+lc_122880_2_b_k6v rc 0: hot 5.9 % attn 5.751 ms prep 0.494 ms | mean cos 0.999784 min 0.988482 cos<0.99 3 cos<0.9 0 
+lc_65536_0_b_k9 rc 0: hot 19.2 % attn 3.464 ms prep 0.323 ms | mean cos 0.999390 min 0.987286 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_k8 rc 0: hot 19.2 % attn 3.463 ms prep 0.307 ms | mean cos 0.999391 min 0.987269 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_k7 rc 0: hot 19.2 % attn 3.481 ms prep 0.292 ms | mean cos 0.999388 min 0.987117 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_k6 rc 0: hot 19.2 % attn 3.448 ms prep 0.293 ms | mean cos 0.999391 min 0.987172 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_k9v rc 0: hot 19.2 % attn 3.427 ms prep 0.293 ms | mean cos 0.999390 min 0.987303 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_k6v rc 0: hot 19.2 % attn 3.486 ms prep 0.292 ms | mean cos 0.999392 min 0.987318 cos<0.99 14 cos<0.9 0 
+lc_65536_2_b_k9 rc 0: hot 9.4 % attn 3.416 ms prep 0.324 ms | mean cos 0.999833 min 0.992074 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_k8 rc 0: hot 9.4 % attn 3.428 ms prep 0.306 ms | mean cos 0.999832 min 0.991968 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_k7 rc 0: hot 9.4 % attn 3.417 ms prep 0.294 ms | mean cos 0.999842 min 0.993262 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_k6 rc 0: hot 9.4 % attn 3.418 ms prep 0.297 ms | mean cos 0.999847 min 0.993286 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_k9v rc 0: hot 9.4 % attn 3.414 ms prep 0.293 ms | mean cos 0.999832 min 0.992376 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_k6v rc 0: hot 9.4 % attn 3.423 ms prep 0.290 ms | mean cos 0.999843 min 0.993173 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k9 rc 0: hot 39.0 % attn 2.598 ms prep 0.194 ms | mean cos 0.999719 min 0.993321 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k8 rc 0: hot 39.0 % attn 2.593 ms prep 0.186 ms | mean cos 0.999719 min 0.993313 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k7 rc 0: hot 39.0 % attn 2.590 ms prep 0.181 ms | mean cos 0.999718 min 0.993417 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k6 rc 0: hot 39.1 % attn 2.603 ms prep 0.176 ms | mean cos 0.999719 min 0.992859 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k9v rc 0: hot 39.0 % attn 2.597 ms prep 0.168 ms | mean cos 0.999716 min 0.993551 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_k6v rc 0: hot 39.1 % attn 2.609 ms prep 0.159 ms | mean cos 0.999715 min 0.992980 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k9 rc 0: hot 63.8 % attn 0.158 ms prep 0.058 ms | mean cos 0.999994 min 0.997447 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k8 rc 0: hot 63.8 % attn 0.159 ms prep 0.052 ms | mean cos 0.999994 min 0.997443 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k7 rc 0: hot 63.8 % attn 0.160 ms prep 0.048 ms | mean cos 0.999994 min 0.997450 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k6 rc 0: hot 63.7 % attn 0.162 ms prep 0.047 ms | mean cos 0.999995 min 0.997738 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k9v rc 0: hot 63.8 % attn 0.160 ms prep 0.051 ms | mean cos 0.999994 min 0.997641 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_k6v rc 0: hot 63.7 % attn 0.160 ms prep 0.046 ms | mean cos 0.999994 min 0.997801 cos<0.99 0 cos<0.9 0 
+kv8192_b_k9 rc 0: hot 19.2 % attn 0.546 ms prep 0.069 ms | mean cos 0.999970 min 0.987853 cos<0.99 1 cos<0.9 0 
+kv8192_b_k8 rc 0: hot 19.2 % attn 0.549 ms prep 0.066 ms | mean cos 0.999971 min 0.987844 cos<0.99 1 cos<0.9 0 
+kv8192_b_k7 rc 0: hot 19.2 % attn 0.548 ms prep 0.066 ms | mean cos 0.999971 min 0.988622 cos<0.99 1 cos<0.9 0 
+kv8192_b_k6 rc 0: hot 19.2 % attn 0.549 ms prep 0.060 ms | mean cos 0.999971 min 0.988698 cos<0.99 1 cos<0.9 0 
+kv8192_b_k9v rc 0: hot 19.2 % attn 0.547 ms prep 0.060 ms | mean cos 0.999970 min 0.987815 cos<0.99 1 cos<0.9 0 
+kv8192_b_k6v rc 0: hot 19.2 % attn 0.549 ms prep 0.158 ms | mean cos 0.999971 min 0.988648 cos<0.99 1 cos<0.9 0 
+### qs6
+lc_122880_0 b_050s rep 1: hot 28.9 % attn 1.801 ms prep 0.137 ms 
+lc_122880_0 b_k9 rep 1: hot 28.4 % attn 1.735 ms prep 0.186 ms 
+lc_122880_0 b_h9 rep 1: hot 28.4 % attn 1.731 ms prep 0.176 ms 
+lc_122880_0 b_h6 rep 1: hot 28.2 % attn 1.750 ms prep 0.160 ms 
+lc_122880_0 b_h9v rep 1: hot 28.4 % attn 1.744 ms prep 0.158 ms 
+lc_122880_0 b_h6v rep 1: hot 28.2 % attn 1.742 ms prep 0.152 ms 
+lc_122880_0 b_050s rep 2: hot 28.9 % attn 1.806 ms prep 0.136 ms 
+lc_122880_0 b_k9 rep 2: hot 28.4 % attn 1.744 ms prep 0.186 ms 
+lc_122880_0 b_h9 rep 2: hot 28.4 % attn 1.735 ms prep 0.177 ms 
+lc_122880_0 b_h6 rep 2: hot 28.2 % attn 1.744 ms prep 0.159 ms 
+lc_122880_0 b_h9v rep 2: hot 28.4 % attn 1.734 ms prep 0.158 ms 
+lc_122880_0 b_h6v rep 2: hot 28.2 % attn 1.741 ms prep 0.150 ms 
+lc_122880_0 b_050s rep 3: hot 28.9 % attn 1.813 ms prep 0.136 ms 
+lc_122880_0 b_k9 rep 3: hot 28.4 % attn 1.738 ms prep 0.185 ms 
+lc_122880_0 b_h9 rep 3: hot 28.4 % attn 1.731 ms prep 0.175 ms 
+lc_122880_0 b_h6 rep 3: hot 28.2 % attn 1.742 ms prep 0.159 ms 
+lc_122880_0 b_h9v rep 3: hot 28.4 % attn 1.731 ms prep 0.159 ms 
+lc_122880_0 b_h6v rep 3: hot 28.2 % attn 1.742 ms prep 0.149 ms 
+lc_65536_2 b_050s rep 1: hot 17.6 % attn 1.666 ms prep 0.137 ms 
+lc_65536_2 b_k9 rep 1: hot 18.2 % attn 1.709 ms prep 0.187 ms 
+lc_65536_2 b_h9 rep 1: hot 18.2 % attn 1.704 ms prep 0.177 ms 
+lc_65536_2 b_h6 rep 1: hot 18.2 % attn 1.711 ms prep 0.160 ms 
+lc_65536_2 b_h9v rep 1: hot 18.2 % attn 1.703 ms prep 0.158 ms 
+lc_65536_2 b_h6v rep 1: hot 18.2 % attn 1.712 ms prep 0.148 ms 
+lc_65536_2 b_050s rep 2: hot 17.6 % attn 1.666 ms prep 0.136 ms 
+lc_65536_2 b_k9 rep 2: hot 18.2 % attn 1.707 ms prep 0.187 ms 
+lc_65536_2 b_h9 rep 2: hot 18.2 % attn 1.705 ms prep 0.177 ms 
+lc_65536_2 b_h6 rep 2: hot 18.2 % attn 1.712 ms prep 0.159 ms 
+lc_65536_2 b_h9v rep 2: hot 18.2 % attn 1.710 ms prep 0.161 ms 
+lc_65536_2 b_h6v rep 2: hot 18.2 % attn 1.708 ms prep 0.150 ms 
+lc_65536_2 b_050s rep 3: hot 17.6 % attn 1.664 ms prep 0.138 ms 
+lc_65536_2 b_k9 rep 3: hot 18.2 % attn 1.715 ms prep 0.187 ms 
+lc_65536_2 b_h9 rep 3: hot 18.2 % attn 1.706 ms prep 0.176 ms 
+lc_65536_2 b_h6 rep 3: hot 18.2 % attn 1.711 ms prep 0.159 ms 
+lc_65536_2 b_h9v rep 3: hot 18.2 % attn 1.706 ms prep 0.159 ms 
+lc_65536_2 b_h6v rep 3: hot 18.2 % attn 1.711 ms prep 0.148 ms 
+lc_122880_0_b_h9 rc 0: hot 10.1 % attn 5.335 ms prep 0.503 ms | mean cos 0.999117 min 0.984337 cos<0.99 888 cos<0.9 0 
+lc_122880_0_b_h6 rc 0: hot 10.1 % attn 5.368 ms prep 0.494 ms | mean cos 0.999113 min 0.984168 cos<0.99 930 cos<0.9 0 
+lc_122880_0_b_h9v rc 0: hot 10.1 % attn 5.344 ms prep 0.497 ms | mean cos 0.999104 min 0.983552 cos<0.99 993 cos<0.9 0 
+lc_122880_0_b_h6v rc 0: hot 10.1 % attn 5.370 ms prep 0.491 ms | mean cos 0.999102 min 0.983528 cos<0.99 990 cos<0.9 0 
+lc_122880_2_b_h9 rc 0: hot 5.9 % attn 5.777 ms prep 0.502 ms | mean cos 0.999770 min 0.986795 cos<0.99 4 cos<0.9 0 
+lc_122880_2_b_h6 rc 0: hot 5.9 % attn 5.775 ms prep 0.495 ms | mean cos 0.999784 min 0.987324 cos<0.99 3 cos<0.9 0 
+lc_122880_2_b_h9v rc 0: hot 5.9 % attn 5.785 ms prep 0.494 ms | mean cos 0.999769 min 0.986324 cos<0.99 4 cos<0.9 0 
+lc_122880_2_b_h6v rc 0: hot 5.9 % attn 5.763 ms prep 0.492 ms | mean cos 0.999779 min 0.986808 cos<0.99 4 cos<0.9 0 
+lc_65536_0_b_h9 rc 0: hot 19.2 % attn 3.427 ms prep 0.300 ms | mean cos 0.999390 min 0.987257 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_h6 rc 0: hot 19.2 % attn 3.441 ms prep 0.291 ms | mean cos 0.999391 min 0.987206 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_h9v rc 0: hot 19.2 % attn 3.437 ms prep 0.293 ms | mean cos 0.999390 min 0.987275 cos<0.99 14 cos<0.9 0 
+lc_65536_0_b_h6v rc 0: hot 19.2 % attn 3.448 ms prep 0.288 ms | mean cos 0.999393 min 0.987338 cos<0.99 14 cos<0.9 0 
+lc_65536_2_b_h9 rc 0: hot 9.4 % attn 3.419 ms prep 0.302 ms | mean cos 0.999830 min 0.992151 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_h6 rc 0: hot 9.4 % attn 3.423 ms prep 0.292 ms | mean cos 0.999844 min 0.993202 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_h9v rc 0: hot 9.4 % attn 3.427 ms prep 0.292 ms | mean cos 0.999829 min 0.992476 cos<0.99 0 cos<0.9 0 
+lc_65536_2_b_h6v rc 0: hot 9.4 % attn 3.415 ms prep 0.290 ms | mean cos 0.999840 min 0.993104 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_h9 rc 0: hot 39.0 % attn 2.596 ms prep 0.185 ms | mean cos 0.999719 min 0.993305 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_h6 rc 0: hot 39.1 % attn 2.611 ms prep 0.168 ms | mean cos 0.999719 min 0.992727 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_h9v rc 0: hot 39.0 % attn 2.603 ms prep 0.165 ms | mean cos 0.999715 min 0.993517 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_h6v rc 0: hot 39.1 % attn 2.614 ms prep 0.159 ms | mean cos 0.999715 min 0.992953 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_h9 rc 0: hot 63.8 % attn 0.158 ms prep 0.058 ms | mean cos 0.999994 min 0.997650 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_h6 rc 0: hot 63.7 % attn 0.160 ms prep 0.061 ms | mean cos 0.999995 min 0.997737 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_h9v rc 0: hot 63.8 % attn 0.161 ms prep 0.049 ms | mean cos 0.999994 min 0.997728 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_h6v rc 0: hot 63.7 % attn 0.160 ms prep 0.051 ms | mean cos 0.999994 min 0.997801 cos<0.99 0 cos<0.9 0 
+kv8192_b_h9 rc 0: hot 19.2 % attn 0.549 ms prep 0.068 ms | mean cos 0.999970 min 0.987839 cos<0.99 1 cos<0.9 0 
+kv8192_b_h6 rc 0: hot 19.2 % attn 0.548 ms prep 0.061 ms | mean cos 0.999971 min 0.988716 cos<0.99 1 cos<0.9 0 
+kv8192_b_h9v rc 0: hot 19.2 % attn 0.550 ms prep 0.149 ms | mean cos 0.999970 min 0.987780 cos<0.99 1 cos<0.9 0 
+kv8192_b_h6v rc 0: hot 19.2 % attn 0.551 ms prep 0.056 ms | mean cos 0.999971 min 0.988652 cos<0.99 1 cos<0.9 0 
+### qs7
+lc_122880_0 b_h9 rep 1: hot 28.4 % attn 1.740 ms prep 0.179 ms 
+lc_122880_0 b_h8 rep 1: hot 28.4 % attn 1.731 ms prep 0.170 ms 
+lc_122880_0 b_h9 rep 2: hot 28.4 % attn 1.730 ms prep 0.176 ms 
+lc_122880_0 b_h8 rep 2: hot 28.4 % attn 1.734 ms prep 0.170 ms 
+lc_122880_0 b_h9 rep 3: hot 28.4 % attn 1.743 ms prep 0.176 ms 
+lc_122880_0 b_h8 rep 3: hot 28.4 % attn 1.743 ms prep 0.169 ms 
+lc_65536_2 b_h9 rep 1: hot 18.2 % attn 1.706 ms prep 0.176 ms 
+lc_65536_2 b_h8 rep 1: hot 18.2 % attn 1.712 ms prep 0.170 ms 
+lc_65536_2 b_h9 rep 2: hot 18.2 % attn 1.708 ms prep 0.175 ms 
+lc_65536_2 b_h8 rep 2: hot 18.2 % attn 1.724 ms prep 0.170 ms 
+lc_65536_2 b_h9 rep 3: hot 18.2 % attn 1.701 ms prep 0.176 ms 
+lc_65536_2 b_h8 rep 3: hot 18.2 % attn 1.701 ms prep 0.171 ms 
+lc_122880_0_b_h8 rc 0: hot 10.1 % attn 5.333 ms prep 0.501 ms | mean cos 0.999117 min 0.984284 cos<0.99 887 cos<0.9 0 
+lc_122880_2_b_h8 rc 0: hot 5.9 % attn 5.788 ms prep 0.499 ms | mean cos 0.999769 min 0.986760 cos<0.99 4 cos<0.9 0 
+lc_65536_0_b_h8 rc 0: hot 19.2 % attn 3.426 ms prep 0.289 ms | mean cos 0.999391 min 0.987245 cos<0.99 14 cos<0.9 0 
+lc_65536_2_b_h8 rc 0: hot 9.4 % attn 3.418 ms prep 0.290 ms | mean cos 0.999828 min 0.992051 cos<0.99 0 cos<0.9 0 
+lc_32768_0_b_h8 rc 0: hot 39.0 % attn 2.593 ms prep 0.177 ms | mean cos 0.999719 min 0.993301 cos<0.99 0 cos<0.9 0 
+ra2dump_78_b_h8 rc 0: hot 63.8 % attn 0.160 ms prep 0.049 ms | mean cos 0.999994 min 0.997652 cos<0.99 0 cos<0.9 0 
+kv8192_b_h8 rc 0: hot 19.2 % attn 0.547 ms prep 0.064 ms | mean cos 0.999970 min 0.987843 cos<0.99 1 cos<0.9 0 
+```
+
+bench/test.sh, final build (`OUT=build/test_v61 REF=v_h8`):
+
+```
+ok lines: 115
+ok   lc_122880_0 default = v_h8
+ok   lc_122880_1 default = v_h8
+ok   lc_122880_2 default = v_h8
+ok   lc_32768_0 default = v_h8
+ok   lc_32768_1 default = v_h8
+ok   lc_32768_2 default = v_h8
+ok   lc_65536_0 default = v_h8
+ok   lc_65536_1 default = v_h8
+ok   lc_65536_2 default = v_h8
+ok   ra2dump_59 default = v_h8
+ok   ra2dump_78 default = v_h8
+ok   ra2dump_87 default = v_h8
+ALL OK
+exit 0
+```
+
+test_v61 logs:
+
+```
+### lc_122880_0
+apa eps    5e-03: cos 0.999793 min 0.987297  hot  10.1 % p2load  15.6 %  attn 5.329 ms (pass2 1.654) 575.5 TOPS  (prep 0.503 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999794 mean cos 0.999117 min 0.984284 | cos<0.99 887 cos<0.9 0 cos<0 0 | relL2 mean 0.02928 p50 0.01866 p99 0.15383 p999 0.17156 max 0.18200
+  full full requant: pooled cos 0.999794 mean cos 0.999117 min 0.984284 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999797 mean cos 0.999152 min 0.985540 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.993392 (chunk 24), max cos<0.99 0, max cos<0.9 0, bitwise equal 27 of 60
+### lc_122880_1
+apa eps    5e-03: cos 0.999974 min 0.998137  hot   9.5 % p2load  29.7 %  attn 5.558 ms (pass2 2.082) 551.7 TOPS  (prep 0.497 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999973 mean cos 0.999959 min 0.997452 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00838 p50 0.00717 p99 0.03213 p999 0.05265 max 0.08917
+  full full requant: pooled cos 0.999973 mean cos 0.999959 min 0.997452 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999973 mean cos 0.999958 min 0.997474 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.997760 (chunk 23), max cos<0.99 0, max cos<0.9 0, bitwise equal 27 of 60
+### lc_122880_2
+apa eps    5e-03: cos 0.999930 min 0.995700  hot   5.9 % p2load  17.9 %  attn 5.776 ms (pass2 1.818) 531.0 TOPS  (prep 0.499 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999927 mean cos 0.999769 min 0.986760 | cos<0.99 4 cos<0.9 0 cos<0 0 | relL2 mean 0.01977 p50 0.01551 p99 0.07740 p999 0.10983 max 0.21536
+  full full requant: pooled cos 0.999927 mean cos 0.999769 min 0.986760 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999927 mean cos 0.999732 min 0.985519 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.971590 (chunk 9), max cos<0.99 6, max cos<0.9 0, bitwise equal 27 of 60
+### lc_65536_0
+apa eps    5e-03: cos 0.999849 min 0.991776  hot  19.2 % p2load  30.0 %  attn 3.424 ms (pass2 1.774) 474.2 TOPS  (prep 0.294 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999849 mean cos 0.999391 min 0.987245 | cos<0.99 14 cos<0.9 0 cos<0 0 | relL2 mean 0.02735 p50 0.02055 p99 0.11421 p999 0.13137 max 0.16395
+  full full requant: pooled cos 0.999849 mean cos 0.999391 min 0.987245 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999844 mean cos 0.999338 min 0.986825 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.998218 (chunk 31), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32
+### lc_65536_1
+apa eps    5e-03: cos 0.999977 min 0.998622  hot  13.7 % p2load  37.8 %  attn 3.319 ms (pass2 1.562) 489.1 TOPS  (prep 0.288 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999980 mean cos 0.999968 min 0.997996 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00713 p50 0.00597 p99 0.02780 p999 0.05268 max 0.08105
+  full full requant: pooled cos 0.999980 mean cos 0.999968 min 0.997996 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999980 mean cos 0.999967 min 0.997869 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.997342 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 18 of 32
+### lc_65536_2
+apa eps    5e-03: cos 0.999935 min 0.996945  hot   9.4 % p2load  23.9 %  attn 3.429 ms (pass2 1.420) 473.5 TOPS  (prep 0.293 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999940 mean cos 0.999828 min 0.992051 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01660 p50 0.01316 p99 0.06569 p999 0.09028 max 0.12585
+  full full requant: pooled cos 0.999940 mean cos 0.999828 min 0.992051 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999941 mean cos 0.999826 min 0.993275 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.977917 (chunk 15), max cos<0.99 3, max cos<0.9 0, bitwise equal 18 of 32
+### lc_32768_0
+apa eps    5e-03: cos 0.999909 min 0.996313  hot  39.0 % p2load  57.8 %  attn 2.597 ms (pass2 1.649) 307.6 TOPS  (prep 0.178 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999915 mean cos 0.999719 min 0.993301 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01998 p50 0.01596 p99 0.06874 p999 0.08919 max 0.11582
+  full full requant: pooled cos 0.999915 mean cos 0.999719 min 0.993301 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999914 mean cos 0.999697 min 0.993073 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.999393 (chunk 15), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+### lc_32768_1
+apa eps    5e-03: cos 0.999987 min 0.999691  hot  23.2 % p2load  59.3 %  attn 2.048 ms (pass2 1.232) 390.1 TOPS  (prep 0.180 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999987 mean cos 0.999974 min 0.998725 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00632 p50 0.00518 p99 0.02542 p999 0.04120 max 0.07162
+  full full requant: pooled cos 0.999987 mean cos 0.999974 min 0.998725 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999987 mean cos 0.999973 min 0.998104 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.998737 (chunk 11), max cos<0.99 0, max cos<0.9 0, bitwise equal 12 of 16
+### lc_32768_2
+apa eps    5e-03: cos 0.999961 min 0.996970  hot  18.2 % p2load  40.6 %  attn 2.099 ms (pass2 1.147) 380.6 TOPS  (prep 0.182 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999962 mean cos 0.999889 min 0.992835 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.01382 p50 0.01101 p99 0.05236 p999 0.07209 max 0.12286
+  full full requant: pooled cos 0.999962 mean cos 0.999889 min 0.992835 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999959 mean cos 0.999883 min 0.993202 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 0.987358 (chunk 13), max cos<0.99 2, max cos<0.9 0, bitwise equal 12 of 16
+### ra2dump_59
+apa eps    5e-03: cos 0.999996 min 0.999888  hot  66.8 % p2load  88.0 %  attn 0.178 ms (pass2 0.145) 144.9 TOPS  (prep 0.048 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999996 mean cos 0.999995 min 0.999164 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00279 p50 0.00208 p99 0.01154 p999 0.01846 max 0.04180
+  full full requant: pooled cos 0.999996 mean cos 0.999995 min 0.999164 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999996 mean cos 0.999995 min 0.999164 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 1 of 1
+### ra2dump_78
+apa eps    5e-03: cos 0.999998 min 0.999809  hot  63.8 % p2load  81.5 %  attn 0.161 ms (pass2 0.123) 160.4 TOPS  (prep 0.133 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999997 mean cos 0.999994 min 0.997652 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00259 p50 0.00167 p99 0.01294 p999 0.02675 max 0.06908
+  full full requant: pooled cos 0.999997 mean cos 0.999994 min 0.997652 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999997 mean cos 0.999994 min 0.997652 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 1 of 1
+### ra2dump_87
+apa eps    5e-03: cos 0.999990 min 0.999715  hot  39.5 % p2load  63.4 %  attn 0.320 ms (pass2 0.224) 241.9 TOPS  (prep 0.085 ms)
+full eps    5e-03: pairs 49152 pooled cos 0.999990 mean cos 0.999981 min 0.998539 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.00576 p50 0.00474 p99 0.02124 p999 0.03113 max 0.05407
+  full full requant: pooled cos 0.999990 mean cos 0.999981 min 0.998539 cos<0.9 0 cos<0 0
+  full incremental: pooled cos 0.999990 mean cos 0.999981 min 0.998539 cos<0.9 0 cos<0 0
+chunks incr vs requant: worst min cos 1.000000 (chunk 0), max cos<0.99 0, max cos<0.9 0, bitwise equal 2 of 2
+```
+
+Sparse call, 0.5.0 / 0.6.0 / 0.6.1 (b061 = test_def), 3 reps (sp3/sp.txt):
+
+```
+lc_122880_0 b050s rep 1: hot 28.9 % attn 1.805 ms prep 0.138 ms 
+lc_122880_0 b060s rep 1: hot 28.4 % attn 1.741 ms prep 0.185 ms 
+lc_122880_0 b061 rep 1: hot 28.4 % attn 1.734 ms prep 0.170 ms 
+lc_122880_0 b050s rep 2: hot 28.9 % attn 1.802 ms prep 0.137 ms 
+lc_122880_0 b060s rep 2: hot 28.4 % attn 1.741 ms prep 0.185 ms 
+lc_122880_0 b061 rep 2: hot 28.4 % attn 1.731 ms prep 0.172 ms 
+lc_122880_0 b050s rep 3: hot 28.9 % attn 1.802 ms prep 0.137 ms 
+lc_122880_0 b060s rep 3: hot 28.4 % attn 1.737 ms prep 0.186 ms 
+lc_122880_0 b061 rep 3: hot 28.4 % attn 1.731 ms prep 0.170 ms 
+lc_65536_2 b050s rep 1: hot 17.6 % attn 1.663 ms prep 0.137 ms 
+lc_65536_2 b060s rep 1: hot 18.2 % attn 1.709 ms prep 0.187 ms 
+lc_65536_2 b061 rep 1: hot 18.2 % attn 1.704 ms prep 0.171 ms 
+lc_65536_2 b050s rep 2: hot 17.6 % attn 1.667 ms prep 0.136 ms 
+lc_65536_2 b060s rep 2: hot 18.2 % attn 1.711 ms prep 0.186 ms 
+lc_65536_2 b061 rep 2: hot 18.2 % attn 1.702 ms prep 0.170 ms 
+lc_65536_2 b050s rep 3: hot 17.6 % attn 1.667 ms prep 0.136 ms 
+lc_65536_2 b060s rep 3: hot 18.2 % attn 1.709 ms prep 0.186 ms 
+lc_65536_2 b061 rep 3: hot 18.2 % attn 1.705 ms prep 0.171 ms 
+lc_32768_2 b050s rep 1: hot 20.1 % attn 1.736 ms prep 0.136 ms 
+lc_32768_2 b060s rep 1: hot 21.0 % attn 1.811 ms prep 0.189 ms 
+lc_32768_2 b061 rep 1: hot 21.0 % attn 1.806 ms prep 0.170 ms 
+lc_32768_2 b050s rep 2: hot 20.1 % attn 1.737 ms prep 0.136 ms 
+lc_32768_2 b060s rep 2: hot 21.0 % attn 1.803 ms prep 0.185 ms 
+lc_32768_2 b061 rep 2: hot 21.0 % attn 1.806 ms prep 0.170 ms 
+lc_32768_2 b050s rep 3: hot 20.1 % attn 1.742 ms prep 0.135 ms 
+lc_32768_2 b060s rep 3: hot 21.0 % attn 1.807 ms prep 0.185 ms 
+lc_32768_2 b061 rep 3: hot 21.0 % attn 1.810 ms prep 0.172 ms 
+```

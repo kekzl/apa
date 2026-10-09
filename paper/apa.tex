@@ -14,7 +14,7 @@
 \title{APA: Adaptive-Precision Attention\\
 \large Exact FP16 for the Few Tiles That Matter, FP4 for the Rest}
 \author{Raphael Friedmann\\\small\url{https://github.com/kekzl/apa}}
-\date{October 2026, APA 0.6.0}
+\date{October 2026, APA 0.6.1}
 
 \begin{document}
 \maketitle
@@ -33,7 +33,7 @@ dumps from $-0.638155$ to 0.841302 and removes all 899 pairs with negative cosin
 rows that remain worst lose their accuracy to FP4 rounding of $Q$, not of $K$, $P$ or $V$ (host emulation per
 error source); a second FP4 term of $Q$, UE4M3 instead of power-of-two $P$ scales and block scales of least
 squared error remove all 137 pairs below cosine 0.9 on twelve dumps and raise the worst minimum from 0.773144 to
-0.984354, at 6.7 to 25.4\,\% more attention time. At
+0.984284, at 6.7 to 25.4\,\% more attention time. At
 $\eps=0.005$ and 122880 keys, 6.0 to 10.3\,\% of active tiles are hot and the attention kernel of APA 0.3.0 runs
 2.50$\times$ faster than the same kernel with every tile exact (2.196$\times$ with the 0.730\,ms quantization
 step included); the speedup grows with context from 1.30$\times$ at 8192 keys. Integrated into the imp inference engine (version 0.2.0 of the kernel), dense
@@ -180,10 +180,12 @@ per tile. Section~\ref{sec:qerr} shows why: FP4 rounding of $Q$, not of $K$, $P$
 with two terms, $P$ became the largest error source, which the UE4M3 scale above addresses.
 
 \paragraph{Block scales.} Every block of 16 values the prep quantizes ($Q_1$, $Q_2$, K, $V^\top$) takes the UE4M3
-scale code among $c_0-2,\dots,c_0+6$, $c_0$ the code nearest to $\max|x|/6$, with the least squared error after an
-E2M1 round trip (ranked in f16x2). The nearest code can round the scale down, which clips the block maximum at 6,
-or up, which wastes part of the grid. At short context FP4 rounding of K decides the worst rows
-(Section~\ref{sec:qerr}); the search costs prep time only.
+scale code among $c_0+\{0,\pm1,-2,3,4,5,6\}$, $c_0$ the code nearest to $\max|x|/6$, with the least squared error
+after an E2M1 round trip. The nearest code can round the scale down, which clips the block maximum at 6, or up,
+which wastes part of the grid. At short context FP4 rounding of K decides the worst rows (Section~\ref{sec:qerr}).
+The error per candidate comes from $x$ in f16x2 and one F2FP conversion each way
+(\code{cvt.rn.satfinite.e2m1x2.f16x2}): prep for 2048 queries on 26624 keys takes 0.170 instead of 0.137\,ms, at
+122880 keys 0.501 instead of 0.492\,ms; attention time is unchanged.
 
 \paragraph{Lazy maximum.} The running maximum $m$ (log$_2$ domain) is updated, with a full quad reduction
 and a rescale of $o$, $\ell_{\text{cold}}$ and $\lambda$, only when some score exceeds $m+\tau$ with
@@ -395,7 +397,7 @@ covers only the first 65536, 81920, 98304 or 108544 keys gives 431, 222, 104 and
 power-of-two scales of the prep and an overflow redo, every restat chunk equals the full requantization bitwise
 (27 of 60 chunks on lc\_122880\_*); the last chunk reaches 0.821417 and 24 pairs below 0.9 (full
 requantization: 0.847877 and 13), at 176.53 instead of 183.53\,ms. (0.4.0, single-term $Q$.)
-In 0.6.0 the last chunk reaches 0.985671 and no pair below 0.9 (full requantization: 0.987727, 0). 5 reruns stay
+In 0.6.1 the last chunk reaches 0.985519 and no pair below 0.9 (full requantization: 0.986760, 0). 5 reruns stay
 bitwise identical.
 
 \subsection{Error source of the worst rows}
@@ -477,28 +479,29 @@ $r_k=\mathrm{rms}(k-\bar k)$ per channel.}
  & \multicolumn{2}{c}{min cos} & \multicolumn{2}{c}{pairs $<0.99$} & \multicolumn{2}{c}{attn ms} \\
 Dump & 0.4.0 & now & 0.4.0 & now & 0.4.0 & now \\
 \midrule
-lc\_122880\_0 & 0.957087 & 0.984354 & 1612 & 893 & 4.525 & 5.567 \\
-lc\_122880\_1 & 0.972723 & 0.997481 & 13 & 0 & 4.749 & 5.909 \\
-lc\_122880\_2 & 0.847877 & 0.987727 & 1224 & 3 & 4.964 & 6.223 \\
-lc\_65536\_0 & 0.773144 & 0.987286 & 1296 & 14 & 3.034 & 3.666 \\
-lc\_65536\_1 & 0.985146 & 0.997999 & 6 & 0 & 3.168 & 3.380 \\
-lc\_65536\_2 & 0.909434 & 0.992074 & 370 & 0 & 2.903 & 3.478 \\
-lc\_32768\_0 & 0.938131 & 0.993321 & 503 & 0 & 2.391 & 2.616 \\
-lc\_32768\_1 & 0.990549 & 0.998707 & 0 & 0 & 1.865 & 2.069 \\
-lc\_32768\_2 & 0.970655 & 0.993964 & 170 & 0 & 1.926 & 2.215 \\
-ra2dump\_59 & 0.993380 & 0.999172 & 0 & 0 & 0.168 & 0.178 \\
-ra2dump\_78 & 0.991309 & 0.997447 & 0 & 0 & 0.149 & 0.160 \\
-ra2dump\_87 & 0.983843 & 0.998522 & 2 & 0 & 0.296 & 0.321 \\
+lc\_122880\_0 & 0.957087 & 0.984284 & 1612 & 887 & 4.525 & 5.567 \\
+lc\_122880\_1 & 0.972723 & 0.997452 & 13 & 0 & 4.749 & 5.909 \\
+lc\_122880\_2 & 0.847877 & 0.986760 & 1224 & 4 & 4.964 & 6.223 \\
+lc\_65536\_0 & 0.773144 & 0.987245 & 1296 & 14 & 3.034 & 3.666 \\
+lc\_65536\_1 & 0.985146 & 0.997996 & 6 & 0 & 3.168 & 3.380 \\
+lc\_65536\_2 & 0.909434 & 0.992051 & 370 & 0 & 2.903 & 3.478 \\
+lc\_32768\_0 & 0.938131 & 0.993301 & 503 & 0 & 2.391 & 2.616 \\
+lc\_32768\_1 & 0.990549 & 0.998725 & 0 & 0 & 1.865 & 2.069 \\
+lc\_32768\_2 & 0.970655 & 0.992835 & 170 & 0 & 1.926 & 2.215 \\
+ra2dump\_59 & 0.993380 & 0.999164 & 0 & 0 & 0.168 & 0.178 \\
+ra2dump\_78 & 0.991309 & 0.997652 & 0 & 0 & 0.149 & 0.160 \\
+ra2dump\_87 & 0.983843 & 0.998539 & 2 & 0 & 0.296 & 0.321 \\
 \bottomrule
 \end{tabular}
-\caption{0.4.0 (single-term $Q$, power-of-two $P$ scales, nearest block scales) vs now (0.6.0: two-term $Q$, UE4M3
-$P$ scales, block scales of least squared error), all 49152 pairs, $\eps=0.005$; times from one run, minimum of 2
-repetitions. Pairs below 0.9: 137 $\to$ 0. ra2dump: 2048 queries at 2048 or 4096 keys.}
+\caption{0.4.0 (single-term $Q$, power-of-two $P$ scales, nearest block scales) vs now (0.6.1: two-term $Q$, UE4M3
+$P$ scales, block scales of least squared error), all 49152 pairs, $\eps=0.005$; times of 0.6.0 (same attention
+kernel) from one run with 0.4.0, minimum of 2 repetitions. Pairs below 0.9: 137 $\to$ 0. ra2dump: 2048 queries
+at 2048 or 4096 keys.}
 \label{tab:q2}
 \end{table}
 
 Table~\ref{tab:q2} shows the current kernel (with the block scales below). All 137 pairs below 0.9 disappear,
-the minimum rises on all twelve dumps, the worst from 0.773144 to 0.984354, and pairs below 0.99 fall from 5196 to 910
+the minimum rises on all twelve dumps, the worst from 0.773144 to 0.984284, and pairs below 0.99 fall from 5196 to 905
 (9 dumps fewer, 3 at zero in both). Attention time grows by 6.7 to 25.4\,\% on the nine long dumps (one run): the
 second $Q$ term doubles the $QK^\top$ OMMAs of pass 1 (pass 1 alone +24.1 to +30.7\,\%), the UE4M3 $P$ scale adds
 5.1 to 5.2\,\%.
@@ -509,31 +512,32 @@ cosine of 0.5.0 is 0.918134, 0.920212, 0.883160 and 0.948890. Emulation of the 2
 $K$: exact $K$ lifts their mean cosine from 0.979228 to 0.999511, exact $P$, $V$ or $Q$ leaves it between 0.979729
 and 0.980116. Block scales of least squared error (Section~\ref{sec:hot}, Block scales) lift the emulated mean to
 0.993929 with $K$ alone. Table~\ref{tab:bs} compares candidate sets in the kernel: a choice between $\max|x|/6$ and
-$\max|x|/4$ loses on lc\_122880\_0, a contiguous range around the nearest code wins on all three. The kept range
-$c_0-2,\dots,c_0+6$ matches $c_0-2,\dots,c_0+8$ ($c_0+7$ and $c_0+8$: 7521 of 97.7 million blocks in the emulation of
-lc\_122880\_0). Against 0.5.0 in one run, pairs below 0.99 fall from 1163 to 910 on the twelve dumps, the worst
-minimum rises from 0.980723 to 0.984354, and at 8192 / 4096 keys the minimum rises to 0.987853 / 0.977414 (pairs
-below 0.99: 24 $\to$ 1, 14 $\to$ 2). Mean cosine falls on 3 of 14 runs (lc\_122880\_2: 0.999833 $\to$ 0.999775).
-Prep grows by 0.010 to 0.045\,ms; attention time is unchanged.
+$\max|x|/4$ loses on lc\_122880\_0, a range around the nearest code wins on all three. $c_0+7$ and $c_0+8$ were chosen
+for 7521 of 97.7 million blocks in the emulation of lc\_122880\_0; dropping $c_0+2$ costs nothing, dropping $c_0-2$ or
+the V search does. Against 0.5.0, pairs below 0.99 fall from 1163 to 905 on the twelve dumps, the worst minimum rises
+from 0.980723 to 0.984284, and at 8192 keys the minimum rises to 0.987843 (pairs below 0.99: 24 $\to$ 1). Mean
+cosine falls on 3 of 13 runs (lc\_122880\_2: 0.999833 $\to$ 0.999769).
 
 \begin{table}[t]
 \centering\footnotesize
-\setlength{\tabcolsep}{2pt}
+\setlength{\tabcolsep}{1.5pt}
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
  & prep & \multicolumn{3}{c}{pairs $<0.99$} \\
-Candidates & ms & lc\_122880\_0 & lc\_65536\_0 & 8192 keys \\
+Candidates & ms & lc\_122880\_0 & lc\_65536\_0 & 8192 k. \\
 \midrule
 $c_0$ (0.5.0) & 0.492 & 1115 & 42 & 24 \\
 $c_0$, $c_4$ & 0.492 & 1831 & 75 & 14 \\
 $c_0$, $c_0+1$, $c_4$, $c_4+1$ & 0.499 & 1783 & 32 & 17 \\
 $c_0$, $c_0\pm1$, $c_4$ & 0.499 & 1175 & 10 & 2 \\
 $c_0-2..c_0+8$ & 0.590 & 892 & 14 & 1 \\
-$c_0-2..c_0+6$ (kept) & 0.530 & 893 & 14 & 1 \\
+$c_0-2..c_0+6$ (0.6.0) & 0.530 & 893 & 14 & 1 \\
+$c_0-2..c_0+6$, no $c_0+2$ & 0.501 & 887 & 14 & 1 \\
 \bottomrule
 \end{tabular}
 \caption{Block scale candidates (UE4M3 codes; $c_0$, $c_4$: nearest to $\max|x|/6$, $\max|x|/4$), least squared
-error, all 49152 pairs, $\eps=0.005$; prep time of lc\_122880\_0. 8192 keys: first 8192 keys of lc\_122880\_2.}
+error, all 49152 pairs, $\eps=0.005$; prep time of lc\_122880\_0. 8192 k.: first 8192 keys of lc\_122880\_2. Last row kept
+(0.6.1): error from $x$ in f16x2; the rows above it rank from $x$ in f32.}
 \label{tab:bs}
 \end{table}
 
@@ -689,8 +693,8 @@ APA 0.2.0 / 0.1.0.}
   0.841302) has the shape of Table~\ref{tab:diag}: 3 hot tiles, the largest with 0.9101 of the mass, FP32
   cold mass 0.0794, and a cold output component 1.918 times the reference norm, so FP4 error on the tail
   decides the result. A test weighted by the value norm of a tile, or a bound on the accumulated cold mass,
-  would target such rows. In 0.6.0 the worst pair of twelve dumps has cosine 0.984354 (lc\_122880\_0), which
-  also has the most pairs below 0.99 (893).
+  would target such rows. In 0.6.1 the worst pair of twelve dumps has cosine 0.984284 (lc\_122880\_0), which
+  also has the most pairs below 0.99 (887).
 \item \textbf{Chunked prefill.} The incremental tile cache keeps the K mean of its last restat; on
   lc\_122880\_2 the pairs below 0.9 grow from 24 to 431 as the context grows to 1.84 times the keys of that mean
   (1.11 times: 56; single-term $Q$; with two-term $Q$ the last chunk has none). \code{KV\_RESTAT} 1.125 caps the growth for 2.6\,\% more time; a per-restat K mean with a per-row score
