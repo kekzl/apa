@@ -169,6 +169,7 @@ old Tables 4 / 5 reproduced exactly, so their times stay and the accuracy column
 | Incremental vs full requant, lc_122880_1 | 0.993415 vs 0.997192 | 0.974581 vs 0.975775, 0 < 0.9 | paper text |
 
 Open: 14 pairs < 0.9 (lc_122880_2, eps 0.005), 18 at eps 0.02; incremental cache adds 261 on the same dump.
+Closed in 0.5.0 (Phase 8): lc_122880_2, eps 0.005: 0 pairs < 0.9, incremental last chunk 0.
 
 ## Phase 4: incremental tile cache
 
@@ -219,6 +220,7 @@ Runs: PERF_LOG "Phase 5". Reusable: `bench/test.sh` (12 dumps x 9 checks + 7 bui
 
 Open: lc_65536_0 (124 pairs < 0.9 at eps 0.005, 0.3.0 prep: 149) is the worst dump measured; cause not
 measured yet (`-DAPA_DBG` top-20 as in Phase 1).
+Closed in Phase 6: FP4 rounding of Q; 0.5.0: 0 pairs < 0.9, min 0.985485.
 
 ## Phase 6: worst rows after 0.4.0 (lc_65536_0, lc_122880_2)
 
@@ -250,6 +252,7 @@ bench/test.sh with `APA_Q2=2`: 117 ok (all checks of Phase 5; legacy `APA_PREP_S
 
 Open: prep +0.04 ms at 122880 keys (0.480 -> 0.520), +0.06 ms at 32768 (0.138 -> 0.196) from the channel order
 (q_perm_kernel, permuted quant_kv / quant_q); not profiled.
+Closed in Phase 9: channel order removed; 0.5.0 vs 0.4.0 prep +0.004 to +0.019 ms.
 
 ## Phase 7: P scale and channel ranking after two-term Q
 
@@ -295,3 +298,57 @@ v_all: pairs < 0.99 lower or equal on 12 of 12 (1640 -> 1163), mean cos higher o
 Decision: v_all is the only scheme. Removed: `APA_Q2`, `APA_PFINE`, `APA_QPERM_K`, `q_perm_kernel`, channel
 permutation in quant_q / quant_kv, K^2 stats. Library vs v0.4.0: 4 files, +49 / -9. bench/test.sh with `REF=v_all`:
 115 ok, default = v_all bitwise on 12 of 12 dumps.
+
+## Phase 9: open points after 0.5.0, block scale by least squared error
+
+Runs: PERF_LOG "Phase 9". eps 0.005, all pairs unless noted.
+
+| Open point | Measurement | Verdict |
+|---|---|---|
+| prep cost (Phase 6) | 0.4.0 vs 0.5.0, same run, 9 dumps x 2 reps: prep +0.004 to +0.019 ms (second Q term) | closed |
+| attention cost of the second Q term | same run: +3.6 to +28.0 % (122880 keys: +23.7 to +28.0 %); SASS: OMMA 33 -> 49, MUFU 100 -> 108, spill stores 48 B both | price of Phase 6 |
+| residual Q term only on tiles that can carry > 2^-T of the row sum (T 12 / 16 / 20) | lc_122880_0 attn 5.431 -> 8.204 / 8.193 / 8.025 ms, pairs < 0.99 1115 in all four | dead: vote after term 1 + spills (48 -> 234 B), no tile skipped in effect |
+| per-restat K mean (Phase 4) | every chunk vs FP32 (`APA_CHUNKS=3`, 0.5.0), sum of pairs < 0.99 over all chunks, full requant / incremental: lc_122880_2 799 / 748, lc_122880_0 23758 / 23349, lc_65536_0 1304 / 1704 | open, small: worse on 1 of 3 dumps |
+
+Short context, lc_122880_2, first N keys (`APA_KV`, = chunk N / 2048 - 1): 0.5.0 min cos 0.918134 / 0.920212 / 0.883160 /
+0.948890 at 4096 / 6144 / 8192 / 10240. Host emulation, top 20 at 8192 keys: kernel 0.979228; exact K 0.999511; exact P, V
+or Q 0.979729 to 0.980116. Cause: FP4 rounding of K.
+
+Block scale: UE4M3 code nearest to amax / 6 rounds the scale down or up by up to half a code step; a rounded-down scale
+clips the block maximum at E2M1 6. Fix: per 16-value block, the code in nearest - 2 .. + 6 with the least squared error
+(prep only: Q both terms, K, V; quant16). Emulation, top 20 at 8192 keys, K only: 0.979843 -> 0.993929. Chosen offsets
+(emulation, lc_122880_0, offsets -2 .. +8): 1059725 / 18038103 / 32761747 / 7791964 / 290967 / 3372320 / 14004351 /
+17029242 / 3323804 / 7521 / 0.
+
+| Candidates (code offsets from nearest) | prep ms, lc_122880_0 | pairs < 0.99, lc_122880_0 / lc_65536_0 / 8192 keys |
+|---|---|---|
+| 0 (0.5.0) | 0.492 | 1115 / 42 / 24 |
+| -2 .. +8, fp32 error (first version) | 1.618 | 907 / 14 / 1 |
+| 0, -1, +1, amax / 4 | 0.499 | 1175 / 10 / 2 |
+| 0, +1, amax / 4, amax / 4 + 1 | 0.499 | 1783 / 32 / 17 |
+| 0, amax / 4 | 0.492 | 1831 / 75 / 14 |
+| -2 .. +8, f16x2 error | 0.590 | 892 / 14 / 1 |
+| -2 .. +6, f16x2 error (kept) | 0.530 | 893 / 14 / 1 |
+
+Same run, 0.5.0 / -2 .. +6:
+
+| Dump | pairs < 0.99 | min cos | mean cos | prep ms |
+|---|---|---|---|---|
+| lc_122880_0 | 1115 / 893 | 0.982774 / 0.984354 | 0.999022 / 0.999117 | 0.493 / 0.530 |
+| lc_122880_1 | 0 / 0 | 0.997516 / 0.997481 | 0.999955 / 0.999959 | 0.489 / 0.531 |
+| lc_122880_2 | 4 / 3 | 0.980723 / 0.987727 | 0.999833 / 0.999775 | 0.500 / 0.533 |
+| lc_65536_0 | 42 / 14 | 0.985485 / 0.987286 | 0.999279 / 0.999390 | 0.287 / 0.327 |
+| lc_65536_1 | 0 / 0 | 0.997955 / 0.997999 | 0.999965 / 0.999968 | 0.288 / 0.326 |
+| lc_65536_2 | 0 / 0 | 0.990073 / 0.992074 | 0.999870 / 0.999833 | 0.297 / 0.327 |
+| lc_32768_0 | 0 / 0 | 0.990098 / 0.993321 | 0.999660 / 0.999719 | 0.156 / 0.197 |
+| lc_32768_1 | 0 / 0 | 0.998213 / 0.998707 | 0.999972 / 0.999974 | 0.156 / 0.198 |
+| lc_32768_2 | 0 / 0 | 0.993297 / 0.993964 | 0.999892 / 0.999891 | 0.156 / 0.201 |
+| ra2dump_59 | 0 / 0 | 0.996188 / 0.999172 | 0.999990 / 0.999995 | 0.034 / 0.056 |
+| ra2dump_78 | 2 / 0 | 0.988453 / 0.997447 | 0.999988 / 0.999994 | 0.042 / 0.052 |
+| ra2dump_87 | 0 / 0 | 0.997270 / 0.998522 | 0.999975 / 0.999981 | 0.042 / 0.059 |
+| lc_122880_2, 8192 keys | 24 / 1 | 0.883160 / 0.987853 | 0.999926 / 0.999970 | 0.049 / 0.075 |
+| lc_122880_2, 4096 keys | 14 / 2 | 0.918134 / 0.977414 | 0.999949 / 0.999971 | 0.045 / 0.060 |
+
+Decision: -2 .. +6 (9 codes, f16x2 error ranking). Pairs < 0.99, 12 dumps: 1163 -> 910; worst min 0.980723 -> 0.984354;
+pairs < 0.9 at 8192 keys 1 -> 0. Mean cos lower on 3 of 14 (lc_122880_2 0.999833 -> 0.999775), min cos lower on 1 of 14
+(lc_122880_1 0.997516 -> 0.997481). Prep +0.010 to +0.045 ms; attention unchanged.

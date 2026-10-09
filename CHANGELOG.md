@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0 (2026-10-09)
+
+- Prep: UE4M3 block scale per 16 values (Q both terms, K, V) = the code in nearest(amax / 6) - 2 .. + 6 with the least
+  squared error after an E2M1 round trip (f16x2 ranking); was the nearest code. Cause (AUDIT.md, Phase 9): at short
+  context FP4 rounding of K decides the worst rows (lc_122880_2, first 8192 keys, top 20, exact K: 0.979228 ->
+  0.999511). Same run vs 0.5.0, eps 0.005, all pairs: 12 dumps pairs < 0.99 1163 -> 910, worst min cos 0.980723 ->
+  0.984354; lc_122880_2 first 8192 keys min cos 0.883160 -> 0.987853, pairs < 0.99 24 -> 1. Mean cos lower on 3 of 14
+  (lc_122880_2 0.999833 -> 0.999775). Prep +0.010 to +0.045 ms, attention unchanged.
+- KvState last chunk, lc_122880_2: incremental min cos 0.988101 -> 0.985671, full requantization 0.980723 -> 0.987727,
+  0 pairs < 0.9 in both. bench/test.sh: 115 ok.
+- Measured, not kept: second Q term only on tiles that can carry > 2^-T of the row sum (T 12 / 16 / 20):
+  lc_122880_0 attention 5.431 -> 8.025 to 8.204 ms, accuracy unchanged.
+- Bench: `APA_CHUNKS=3` (every chunk, full requantization and incremental, vs FP32); `APA_ERRSRC` emulates the block
+  scale search (variant "nearest block scales").
+- vs 0.4.0, one run, min of 2 reps: attention +6.7 to +25.4 % (9 long dumps), prep 0.481 -> 0.528 ms (122880 keys).
+  The 0.5.0 entry (+9.7 to +25.8 %) compared two runs; 0.5.0 vs 0.4.0 in one run: +3.6 to +28.0 %.
+- Docs: imp prefill / PPL with 0.5.0 (relayed, kekzl/imp#2646).
+
 ## 0.5.0 (2026-10-09)
 
 - Pass 1: Q as two E2M1 terms on all 128 channels: term 2 = residual of term 1 in the same row scale, same

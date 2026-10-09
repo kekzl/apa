@@ -457,8 +457,8 @@ int main(int argc, char** argv) {
         std::printf("\n");
       }
       // APA_ERRSRC=1: error source of the top-20 pairs, host emulation of pass 1 on the cold tiles (hot tiles exact, as
-      // pass 2). Q, K in E2M1 x UE4M3 per 16 channels of a channel order (perm), Q residual on its first nres channels;
-      // P in E2M1 with a power-of-two scale per 16 keys; V in E2M1 x UE4M3 per 16 tokens. Mean cos over the 20 pairs.
+      // pass 2). Q (two terms), K, V in E2M1 x UE4M3 per 16 (block scale by least squared error, as quant16); P in E2M1
+      // with a UE4M3 scale per 16 keys. Mean cos over the 20 pairs.
       if (std::getenv("APA_ERRSRC")) {
         auto e2m1 = [](double x) {  // round to nearest E2M1 magnitude, sign kept, saturating at 6
           static const double g[8] = {0, 0.5, 1, 1.5, 2, 3, 4, 6};
@@ -467,15 +467,32 @@ int main(int argc, char** argv) {
           for (int i = 1; i < 8; ++i) if (std::fabs(a - g[i]) < std::fabs(a - g[best])) best = i;
           return x < 0 ? -g[best] : g[best];
         };
-        auto e4m3 = [](double x) { return (double)__half2float(__half(__nv_cvt_fp8_to_halfraw(
-                                       __nv_cvt_float_to_fp8((float)x, __NV_SATFINITE, __NV_E4M3), __NV_E4M3))); };
-        auto blockq = [&](double* x, int n, double gscale) {  // in place: x / gscale per 16 in E2M1 x UE4M3
+        auto dec8 = [](int c) {  // UE4M3 code -> value
+          return (double)__half2float(__half(__nv_cvt_fp8_to_halfraw((__nv_fp8_storage_t)c, __NV_E4M3)));
+        };
+        long mhist[9] = {};  // chosen block scale code offset -2 .. +6 from the nearest code of amax / 6
+        // in place: x / gscale per 16 in E2M1 x UE4M3; block scale as quant16 (mse) or nearest to amax / 6
+        auto blockq = [&](double* x, int n, double gscale, bool mse = true) {
           for (int b0 = 0; b0 < n; b0 += 16) {
-            double am = 0;
-            for (int i = 0; i < 16; ++i) am = std::max(am, std::fabs(x[b0 + i] / gscale));
-            const double sb = e4m3(am / 6);
+            double am = 0, y[16];
+            for (int i = 0; i < 16; ++i) y[i] = x[b0 + i] / gscale, am = std::max(am, std::fabs(y[i]));
+            const int c0 = __nv_cvt_float_to_fp8((float)(am / 6), __NV_SATFINITE, __NV_E4M3);
+            int cb = c0;
+            if (mse && am > 0) {
+              double best = 1e300;
+              for (int off : {0, -1, 1, -2, 2, 3, 4, 5, 6}) {
+                const int c = c0 + off;
+                if (c < 1 || c > 0x7E) continue;
+                const double sc = std::max(dec8(c), 1.0 / 512);
+                double e = 0;
+                for (int i = 0; i < 16; ++i) e += (y[i] - e2m1(y[i] / sc) * sc) * (y[i] - e2m1(y[i] / sc) * sc);
+                if (e < best) best = e, cb = c;
+              }
+              ++mhist[cb - c0 + 2];
+            }
+            const double sb = dec8(cb);
             const double inv = 1.0 / std::max(sb, 1.0 / 512);
-            for (int i = 0; i < 16; ++i) x[b0 + i] = e2m1(x[b0 + i] / gscale * inv) * sb * gscale;
+            for (int i = 0; i < 16; ++i) x[b0 + i] = e2m1(y[i] * inv) * sb * gscale;
           }
         };
         auto up2 = [](double x) { return std::exp2(std::ceil(std::log2(x))); };
@@ -492,9 +509,9 @@ int main(int argc, char** argv) {
             }
         std::vector<int> ident(hd);
         for (int e = 0; e < hd; ++e) ident[e] = e;
-        constexpr int NV = 8;  // emulated kernel: Q two terms, UE4M3 P scales; then one change at a time
+        constexpr int NV = 9;  // emulated kernel: Q two terms, UE4M3 P scales, mse block scales; one change at a time
         const char* names[NV] = {"kernel", "emulated", "Q one term", "P power-of-two scale", "P exact", "K exact",
-                                 "V exact", "Q exact"};
+                                 "V exact", "Q exact", "nearest block scales"};
         double acc[NV] = {};
         for (int i = 0; i < 20; ++i) {
           const int s = top[i].x, h = top[i].y, hkv = h / G, nrow = std::min(off + s + 1, kv);
@@ -511,14 +528,14 @@ int main(int argc, char** argv) {
           }
           const double qr = std::max(qam, 1e-20) / 2688;
           // P of the cold tiles from quantized scores: perm, residual channels, quantize Q / K
-          auto pscores = [&](const std::vector<int>& pm, int nres, bool qq_on, bool kq_on) {
+          auto pscores = [&](const std::vector<int>& pm, int nres, bool qq_on, bool kq_on, bool mse = true) {
             std::vector<double> qp(hd), q1(hd), qe(hd), p(nrow);
             for (int e = 0; e < hd; ++e) qp[e] = q[pm[e]];
             q1 = qp;
-            blockq(q1.data(), hd, qr);
+            blockq(q1.data(), hd, qr, mse);
             std::vector<double> res(hd);
             for (int e = 0; e < hd; ++e) res[e] = qp[e] - q1[e];
-            blockq(res.data(), hd, qr);
+            blockq(res.data(), hd, qr, mse);
             for (int e = 0; e < hd; ++e) qe[e] = qq_on ? q1[e] + (e < nres ? res[e] : 0.0) : qp[e];
             for (int j = 0; j < nrow; ++j) {
               std::vector<double> kc(hd);
@@ -528,7 +545,7 @@ int main(int argc, char** argv) {
                 kc[e] = kx - kmean[(size_t)hkv * hd + pm[e]];
                 sx += qp[e] * kx;
               }
-              if (kq_on) blockq(kc.data(), hd, kg);
+              if (kq_on) blockq(kc.data(), hd, kg, mse);
               double sq = 0;
               for (int e = 0; e < hd; ++e) sq += qe[e] * kc[e];
               p[j] = sc[j] * std::exp((sq + shift - sx) * scale);
@@ -558,7 +575,7 @@ int main(int argc, char** argv) {
             }
             return p;
           };
-          std::vector<double> vq((size_t)nrow * hd);
+          std::vector<double> vq((size_t)nrow * hd), vqn((size_t)nrow * hd);  // mse / nearest block scales
           for (int t0 = 0; t0 < nrow; t0 += 64)
             for (int e = 0; e < hd; ++e)
               for (int g = 0; g < 4; ++g) {
@@ -568,10 +585,15 @@ int main(int argc, char** argv) {
                   tok[u] = t0 + apa::slot_token(g * 16 + u);
                   xb[u] = tok[u] < nrow ? __half2float(hv[((size_t)tok[u] * nkv + hkv) * hd + e]) : 0.0;
                 }
+                double xn[16];
+                std::copy(xb, xb + 16, xn);
                 blockq(xb, 16, vg);
-                for (int u = 0; u < 16; ++u) if (tok[u] < nrow) vq[(size_t)tok[u] * hd + e] = xb[u];
+                blockq(xn, 16, vg, false);
+                for (int u = 0; u < 16; ++u)
+                  if (tok[u] < nrow) vq[(size_t)tok[u] * hd + e] = xb[u], vqn[(size_t)tok[u] * hd + e] = xn[u];
               }
-          auto out = [&](const std::vector<double>& pc, bool quant_v) {  // cold tiles from pc / vq, hot exact
+          auto out = [&](const std::vector<double>& pc, bool quant_v, bool mse = true) {  // cold pc / vq, hot exact
+            const std::vector<double>& vs = mse ? vq : vqn;
             std::vector<double> o(hd, 0.0);
             double l = 0;
             for (int j = 0; j < nrow; ++j) {
@@ -580,7 +602,8 @@ int main(int argc, char** argv) {
               const double pj = hot ? (double)sc[j] : pc[j];
               l += pj;
               for (int e = 0; e < hd; ++e)
-                o[e] += pj * ((!hot && quant_v) ? vq[(size_t)j * hd + e] : __half2float(hv[((size_t)j * nkv + hkv) * hd + e]));
+                o[e] += pj * ((!hot && quant_v) ? vs[(size_t)j * hd + e]
+                                                : __half2float(hv[((size_t)j * nkv + hkv) * hd + e]));
             }
             double d = 0, x = 0, y = 0;
             for (int e = 0; e < hd; ++e) {
@@ -597,7 +620,8 @@ int main(int argc, char** argv) {
                                 out(p2, true),
                                 out(pquant(pscores(ident, hd, true, false), true), true),
                                 out(pquant(p2, true), false),
-                                out(pquant(pscores(ident, hd, false, true), true), true)};
+                                out(pquant(pscores(ident, hd, false, true), true), true),
+                                out(pquant(pscores(ident, hd, true, true, false), true), true, false)};
           for (int k = 0; k < NV; ++k) acc[k] += c[k] / 20;
           std::printf("  errsrc %2d s %4d h %2d:", i, s, h);
           for (int k = 0; k < NV; ++k) std::printf(" %.6f", c[k]);
@@ -605,6 +629,9 @@ int main(int argc, char** argv) {
         }
         std::printf("errsrc mean of top 20:");
         for (int k = 0; k < NV; ++k) std::printf(" | %s %.6f", names[k], acc[k]);
+        std::printf("\n");
+        std::printf("errsrc block scale code offset -2 .. +6:");
+        for (long c : mhist) std::printf(" %ld", c);
         std::printf("\n");
       }
       CK(cudaFree(dtop));
@@ -705,8 +732,46 @@ int main(int argc, char** argv) {
     full_summary("incremental");
     std::printf("chunks %d x %d eps %.0e: full requant %.2f ms cos %.6f min %.6f | incremental %.2f ms cos %.6f min %.6f\n",
                 nc, n, eps, tf, cf, cmin, ti, ci, cmin2);
-    // APA_CHUNKS=2: every chunk, incremental vs full requantization (same keys, same Q): min cos over all pairs
-    if (std::atoi(std::getenv("APA_CHUNKS")) == 2) {
+    // APA_CHUNKS=2: every chunk, incremental vs full requantization (same keys, same Q): min cos over all pairs.
+    // APA_CHUNKS=3: also both vs an FP32 reference of every pair per chunk (ref_kernel, batches of 1024).
+    if (std::atoi(std::getenv("APA_CHUNKS")) >= 2) {
+      const bool f32 = std::atoi(std::getenv("APA_CHUNKS")) == 3;
+      const size_t np = (size_t)n * nh;
+      std::vector<float> rc(f32 ? np * hd : 0);
+      int2* dpr = nullptr;
+      float *dscr = nullptr, *dout = nullptr;
+      if (f32) {
+        CK(cudaMalloc(&dpr, 1024 * sizeof(int2)));
+        CK(cudaMalloc(&dscr, (size_t)1024 * kv * 4));
+        CK(cudaMalloc(&dout, (size_t)1024 * hd * 4));
+      }
+      auto chunk_ref = [&](int c) {  // FP32 O of every pair of chunk c into rc
+        std::vector<int2> pr(1024);
+        for (size_t i0 = 0; i0 < np; i0 += 1024) {
+          const int m = (int)std::min<size_t>(1024, np - i0);
+          for (int i = 0; i < m; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
+          CK(cudaMemcpy(dpr, pr.data(), m * sizeof(int2), cudaMemcpyHostToDevice));
+          ref_kernel<<<m, 256>>>(Q, K, V, n, (c + 1) * n, nh, nkv, c * n, scale, dpr, dscr, dout);
+          CK(cudaMemcpy(rc.data() + i0 * hd, dout, (size_t)m * hd * 4, cudaMemcpyDeviceToHost));
+        }
+      };
+      struct Acc { double mn = 1, sum = 0; size_t b99 = 0, b9 = 0; };
+      auto score = [&](const std::vector<T>& h, Acc& a) {  // one chunk vs rc; a accumulates over chunks
+        double cm = 1, cs = 0;
+        size_t c99 = 0, c9 = 0;
+        for (size_t i = 0; i < np; ++i) {
+          double d = 0, x = 0, y = 0;
+          for (int e = 0; e < hd; ++e) {
+            const double r = rc[i * hd + e], b = __half2float(h[i * hd + e]);
+            d += r * b, x += r * r, y += b * b;
+          }
+          const double cc = d / std::sqrt(x * y);
+          cm = std::min(cm, cc), cs += cc, c99 += cc < 0.99, c9 += cc < 0.9;
+        }
+        a.mn = std::min(a.mn, cm), a.sum += cs / np, a.b99 += c99, a.b9 += c9;
+        std::printf(" | f32 min %.6f mean %.6f cos<0.99 %zu cos<0.9 %zu", cm, cs / np, c99, c9);
+      };
+      Acc af, ai;
       std::vector<T> hf(nq), hi(nq);
       double wmin = 1;
       int wc = 0;
@@ -731,13 +796,29 @@ int main(int argc, char** argv) {
           const double cc = d / std::sqrt(x * y);
           cm = std::min(cm, cc), b9 += cc < 0.9, b99 += cc < 0.99;
         }
-        std::printf("  chunk %2d kv %6d stats_len %6d: incr vs requant min cos %.6f cos<0.99 %zu cos<0.9 %zu, %zu differ\n",
-                    c, (c + 1) * n, st.stats_len, cm, b99, b9, nd);
+        std::printf("  chunk %2d kv %6d stats_len %6d: incr vs requant min cos %.6f cos<0.99 %zu cos<0.9 %zu,"
+                    " %zu differ", c, (c + 1) * n, st.stats_len, cm, b99, b9, nd);
+        if (f32) {
+          chunk_ref(c);
+          std::printf("\n    requant");
+          score(hf, af);
+          std::printf("\n    incr   ");
+          score(hi, ai);
+        }
+        std::printf("\n");
         if (cm < wmin) wmin = cm, wc = c;
         w9 = std::max(w9, b9), w99 = std::max(w99, b99);
       }
       std::printf("chunks incr vs requant: worst min cos %.6f (chunk %d), max cos<0.99 %zu, max cos<0.9 %zu, bitwise equal"
                   " %d of %d\n", wmin, wc, w99, w9, neq, nc);
+      if (f32) {
+        std::printf("chunks vs f32, sum over %d chunks: requant min %.6f mean of means %.6f cos<0.99 %zu"
+                    " cos<0.9 %zu | incr min %.6f mean of means %.6f cos<0.99 %zu cos<0.9 %zu\n",
+                    nc, af.mn, af.sum / nc, af.b99, af.b9, ai.mn, ai.sum / nc, ai.b99, ai.b9);
+        CK(cudaFree(dpr));
+        CK(cudaFree(dscr));
+        CK(cudaFree(dout));
+      }
     }
     // stale cache (>= 2 chunks): keys shifted by one token, q_offset == st.len: the fingerprint must force a redo
     if (nc >= 2) {

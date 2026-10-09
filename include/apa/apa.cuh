@@ -13,7 +13,7 @@
 
 // Version of this header set (kekzl/apa); see CHANGELOG.md.
 #define APA_VERSION_MAJOR 0
-#define APA_VERSION_MINOR 5
+#define APA_VERSION_MINOR 6
 #define APA_VERSION_PATCH 0
 
 namespace apa {

@@ -5,6 +5,7 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 
 | Step | What |
 |---|---|
+| Prep | K mean and head scales (sampled stats); Q (two terms), K, V to E2M1 with one UE4M3 scale per 16 values: the code in nearest(amax / 6) - 2 .. + 6 with the least squared error |
 | Pass 1 | all-FP4 flash attention (`mma.sync kind::mxf4nvf4`) over all 64-key tiles, Q as two E2M1 terms (term 2 = residual of term 1), P scales per 16 keys in UE4M3; a tile whose share of the running row sum exceeds `eps` is hot: no P·V here, bit in a per-warp mask |
 | Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its 12 warps |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
@@ -17,22 +18,24 @@ then the diagonal backwards.
 ## Results
 
 Standalone, Llama-3.2-3B attention dumps (2048 queries at kv 122880, 65536 or 32768, 24 / 8 heads), eps 0.005, every
-(row, head) pair (49152) vs FP32 (`APA_FULL=1`), one run (bench/test.sh run; PERF_LOG.md, "Phase 8"):
+(row, head) pair (49152) vs FP32 (`APA_FULL=1`; bench/test.sh run); attn / prep: A/B run vs 0.4.0, min of 2 reps
+(PERF_LOG.md, "Phase 9"):
 
 | Dump | pooled cos | mean cos | min cos | pairs < 0.9 | pairs < 0.99 | hot tiles | attn ms | prep ms |
 |---|---|---|---|---|---|---|---|---|
-| lc_122880_0 | 0.999680 | 0.999022 | 0.982774 | 0 | 1115 | 10.1 % | 5.381 | 0.493 |
-| lc_122880_1 | 0.999969 | 0.999955 | 0.997516 | 0 | 0 | 9.3 % | 5.616 | 0.489 |
-| lc_122880_2 | 0.999898 | 0.999833 | 0.980723 | 0 | 4 | 5.9 % | 5.712 | 0.488 |
-| lc_65536_0 | 0.999770 | 0.999279 | 0.985485 | 0 | 42 | 18.9 % | 3.384 | 0.292 |
-| lc_65536_1 | 0.999979 | 0.999965 | 0.997955 | 0 | 0 | 13.5 % | 3.345 | 0.292 |
-| lc_65536_2 | 0.999917 | 0.999870 | 0.990073 | 0 | 0 | 8.9 % | 3.474 | 0.288 |
-| lc_32768_0 | 0.999877 | 0.999660 | 0.990098 | 0 | 0 | 38.7 % | 2.600 | 0.217 |
-| lc_32768_1 | 0.999985 | 0.999972 | 0.998213 | 0 | 0 | 23.1 % | 2.035 | 0.158 |
-| lc_32768_2 | 0.999942 | 0.999892 | 0.993297 | 0 | 0 | 17.1 % | 2.071 | 0.161 |
+| lc_122880_0 | 0.999794 | 0.999117 | 0.984354 | 0 | 893 | 10.1 % | 5.567 | 0.528 |
+| lc_122880_1 | 0.999973 | 0.999959 | 0.997481 | 0 | 0 | 9.5 % | 5.909 | 0.529 |
+| lc_122880_2 | 0.999927 | 0.999775 | 0.987727 | 0 | 3 | 5.9 % | 6.223 | 0.529 |
+| lc_65536_0 | 0.999849 | 0.999390 | 0.987286 | 0 | 14 | 19.2 % | 3.666 | 0.326 |
+| lc_65536_1 | 0.999980 | 0.999968 | 0.997999 | 0 | 0 | 13.7 % | 3.380 | 0.327 |
+| lc_65536_2 | 0.999941 | 0.999833 | 0.992074 | 0 | 0 | 9.4 % | 3.478 | 0.328 |
+| lc_32768_0 | 0.999915 | 0.999719 | 0.993321 | 0 | 0 | 39.0 % | 2.616 | 0.197 |
+| lc_32768_1 | 0.999987 | 0.999974 | 0.998707 | 0 | 0 | 23.2 % | 2.069 | 0.196 |
+| lc_32768_2 | 0.999962 | 0.999891 | 0.993964 | 0 | 0 | 18.2 % | 2.215 | 0.195 |
 
-0.4.0, same dumps: 137 pairs < 0.9 (lc_122880_2: 13, lc_65536_0: 124), 5196 pairs < 0.99 (12 dumps; now 1163), min
-cos 0.773144 (lc_65536_0; now 0.980723); attn now +9.7 to +25.8 % (two runs; paper, "Error source of the worst rows").
+0.4.0, same dumps: 137 pairs < 0.9 (lc_122880_2: 13, lc_65536_0: 124), 5196 pairs < 0.99 (12 dumps; now 910), min cos
+0.773144 (lc_65536_0; now 0.984354); attn now +6.7 to +25.4 % (same run, min of 2 reps; paper, "Error source of the
+worst rows").
 
 | Term | Definition |
 |---|---|
@@ -49,7 +52,22 @@ APA 0.3.0 with every tile exact (`eps < 0`, pass 2 alone, f16 O), all pairs: lc_
 1.000000, min 0.999997, 12.431 -> 17.339 ms. Deterministic: 5 reruns of prep + attention give bitwise identical
 outputs (`APA_DET=1`).
 
-In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`), measured by the imp integration (relayed, PERF_LOG.md).
+In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`) with APA 0.5.0: kekzl/imp#2646 (imp base 4a24f2df),
+RTX 5090, `apa_eps 0.01` (imp default), `apa_min_kv 8192`; measured by the imp integration (relayed, PERF_LOG.md).
+Llama-3.2-3B Q8_0, 106451-token prompt, `--max-seq-len 108000`, prefill ms, rep 1 / rep 2:
+
+| Mode | FA2 (`apa_eps 0`) | APA 0.4.0 | APA 0.5.0 |
+|---|---|---|---|
+| default (sparse prefill) | 7180.71 / 7025.34 | 5094.99 / 4848.68 | 5305.22 / 5129.80 |
+| dense (`sparse_prefill_topk_tokens=0`) | 11884.58 / 11902.36 | 6220.93 / 6227.74 | 6938.62 / 7033.41 |
+
+Perplexity, corpus `ppl_corpus_45k_gemma4_turn.txt` (below):
+
+| Model | Tokens | FA2 | APA 0.4.0 | APA 0.5.0 |
+|---|---|---|---|---|
+| Qwen3-8B Q8_0 | 14034 | 10.7974 | 10.8063 | 10.7972 |
+| Llama-3.2-3B Q8_0 | 13303 | 17.3644 | 17.3599 | 17.3679 |
+
 APA e71624b (0.3.0), default sparse prefill, `apa_min_kv 8192`, mean of 2, prefill ms:
 
 | Model | Prompt tokens | FA2 (`apa_eps 0`) | APA eps 0.01 |
@@ -88,7 +106,7 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 |---|---|
 | `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream)` | flat K/V; `ws` holds `workspace_bytes(p)` |
 | `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
-| `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.988101, 0 pairs < 0.9 (full requantization per chunk: 0.980723, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
+| `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.985671, 0 pairs < 0.9 (full requantization per chunk: 0.987727, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
 | `supported(p, kv)` | shape gate; every entry point returns false when it declines |
 
 `eps`: tile share of the running row sum above which a tile is exact; use 0.005 (table above).
@@ -103,7 +121,7 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | One eps | `APA_EPS=0.005` |
 | Short context | `APA_KV=8192` (first N keys) |
 | Paged path, bitwise vs flat | `APA_PAGED=16` (block size; `APA_NOSHUF=1`: blocks in order) |
-| Chunked prefill + tile cache | `APA_CHUNKS=1`; `=2` also compares every chunk with a full requantization (bitwise) |
+| Chunked prefill + tile cache | `APA_CHUNKS=1`; `=2` also compares every chunk with a full requantization (bitwise); `=3` also scores every chunk vs FP32 |
 | Batch 2 (batch 1 = V negated), bitwise vs B = 1 | `APA_B2=1` |
 | Raw O per eps to a file / pass-2 union per warp group | `APA_OUT=file` / `APA_UNION=1` |
 | Prep: exact stats (0.3.0) / forced overflow redo (test) | `NVFLAGS=-DAPA_PREP_SAMPLE=0` / `-DAPA_PREP_HEADROOM=0.015625f` |
