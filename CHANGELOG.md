@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Docs: imp prefill / PPL, APA 0.6.0 vs 0.6.1, 4 reps interleaved (relayed, kekzl/imp#2650): sparse -0.28 % (eps 0.01) /
+  -0.15 % (eps 0.005), dense -0.16 % / -1.11 %; 0.6.0 eps 0.005 sparse 5304.72 ms (2-rep run: 5666.82 ms).
+
 ## 0.6.1 (2026-10-09)
 
 - Prep: block scale search cheaper. Candidates {0, -1, 1, -2, 3, 4, 5, 6} code offsets (was -2 .. +6; +2 dropped), x

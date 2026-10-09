@@ -52,17 +52,24 @@ APA 0.3.0 with every tile exact (`eps < 0`, pass 2 alone, f16 O), all pairs: lc_
 outputs (`APA_DET=1`).
 
 In [imp](https://github.com/kekzl/imp) (`attention.apa_eps`), RTX 5090, `apa_min_kv 8192`; measured by the imp
-integration (relayed, PERF_LOG.md). APA 0.5.0 and 0.6.0: kekzl/imp#2648 (imp base 2934f575), one run; FA2 and 0.4.0:
-kekzl/imp#2646. Llama-3.2-3B Q8_0, 106451-token prompt, `--max-seq-len 108000`, prefill ms, rep 1 / rep 2:
+integration (relayed, PERF_LOG.md). Llama-3.2-3B Q8_0, 106451-token prompt, `--max-seq-len 108000`, prefill ms.
+APA 0.6.0 and 0.6.1: kekzl/imp#2650 (imp base 18f0427b), 4 reps interleaved, mean (min .. max):
+
+| APA | eps | default (sparse prefill) | dense (`sparse_prefill_topk_tokens=0`) |
+|---|---|---|---|
+| 0.6.0 | 0.01 | 5004.42 (4995.24 .. 5012.76) | 6739.59 (6728.84 .. 6752.22) |
+| 0.6.1 | 0.01 | 4990.53 (4985.82 .. 4997.10) | 6728.63 (6725.10 .. 6732.46) |
+| 0.6.0 | 0.005 | 5304.72 (5295.11 .. 5313.77) | 7405.02 (7201.78 .. 7548.80) |
+| 0.6.1 | 0.005 | 5296.91 (5286.44 .. 5305.39) | 7322.87 (7164.59 .. 7512.30) |
+
+Earlier runs, 2 reps (rep 1 / rep 2); FA2 and 0.4.0: kekzl/imp#2646, 0.5.0: kekzl/imp#2648:
 
 | Attention | eps | default (sparse prefill) | dense (`sparse_prefill_topk_tokens=0`) |
 |---|---|---|---|
 | FA2 (`apa_eps 0`) | | 7180.71 / 7025.34 | 11884.58 / 11902.36 |
 | APA 0.4.0 | 0.01 | 5094.99 / 4848.68 | 6220.93 / 6227.74 |
 | APA 0.5.0 | 0.01 | 4946.49 / 5005.64 | 6703.86 / 6669.97 |
-| APA 0.6.0 | 0.01 | 5056.78 / 5029.35 | 6730.54 / 6874.74 |
 | APA 0.5.0 | 0.005 | 5242.15 / 5477.81 | 7705.54 / 7685.13 |
-| APA 0.6.0 | 0.005 | 5594.75 / 5738.88 | 7763.12 / 7725.78 |
 
 Perplexity, corpus `ppl_corpus_45k_gemma4_turn.txt` (below), Qwen3-8B Q8_0 (14034 tokens) / Llama-3.2-3B Q8_0
 (13303 tokens): FA2 10.7974 / 17.3644.
@@ -72,6 +79,7 @@ Perplexity, corpus `ppl_corpus_45k_gemma4_turn.txt` (below), Qwen3-8B Q8_0 (1403
 | 0.4.0 | 10.8063 / 17.3599 | |
 | 0.5.0 | 10.7972 / 17.3679 | 10.8071 / 17.3663 |
 | 0.6.0 | 10.7971 / 17.3704 | 10.7965 / 17.3655 |
+| 0.6.1 | 10.7953 / 17.3663 | 10.8032 / 17.3690 |
 
 APA e71624b (0.3.0), default sparse prefill, `apa_min_kv 8192`, mean of 2, prefill ms:
 

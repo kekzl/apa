@@ -3343,3 +3343,18 @@ lc_32768_2 b050s rep 3: hot 20.1 % attn 1.742 ms prep 0.135 ms
 lc_32768_2 b060s rep 3: hot 21.0 % attn 1.807 ms prep 0.185 ms 
 lc_32768_2 b061 rep 3: hot 21.0 % attn 1.810 ms prep 0.172 ms 
 ```
+
+## 2026-10-09 imp prefill / PPL, APA 0.6.0 vs 0.6.1, 4 reps (measured by session ra2-fc, relayed message, no log here)
+
+```
+imp numbers APA 0.6.0 (main 18f0427b) -> 0.6.1, Llama-3.2-3B Q8_0, 106451 tokens, --max-seq-len 108000, 4 reps interleaved, mean (min..max) ms:
+- eps 0.01 sparse: 5004.42 (4995.24..5012.76) -> 4990.53 (4985.82..4997.10)
+- eps 0.01 dense: 6739.59 (6728.84..6752.22) -> 6728.63 (6725.10..6732.46)
+- eps 0.005 sparse: 5304.72 (5295.11..5313.77) -> 5296.91 (5286.44..5305.39)
+- eps 0.005 dense: 7405.02 (7201.78..7548.80) -> 7322.87 (7164.59..7512.30), spread 347 ms, no signal
+PPL ppl_corpus_45k_gemma4_turn 0.6.0 -> 0.6.1: eps 0.01 Qwen3-8B 10.7971 -> 10.7953, Llama-3.2-3B 17.3704 -> 17.3663; eps 0.005 Qwen3-8B 10.7965 -> 10.8032, Llama-3.2-3B 17.3655 -> 17.3690. This session's spread is much tighter than the earlier 2-rep runs (sparse 0.01: 18 ms). PR link follows.
+PR: kekzl/imp#2650 (base 18f0427b).
+```
+
+0.6.1 vs 0.6.0, means: sparse -0.28 % (eps 0.01) / -0.15 % (eps 0.005), dense -0.16 % / -1.11 %. 0.6.0 eps 0.005
+sparse: 5304.72 ms over 4 reps vs 5666.82 ms over 2 reps in kekzl/imp#2648 (Phase 10: spread, not 0.6.0).
