@@ -3358,3 +3358,65 @@ PR: kekzl/imp#2650 (base 18f0427b).
 
 0.6.1 vs 0.6.0, means: sparse -0.28 % (eps 0.01) / -0.15 % (eps 0.005), dense -0.16 % / -1.11 %. 0.6.0 eps 0.005
 sparse: 5304.72 ms over 4 reps vs 5666.82 ms over 2 reps in kekzl/imp#2648 (Phase 10: spread, not 0.6.0).
+
+## 2026-10-09 One KvState-free workspace for all layers: full requantization per chunk vs KvState (main d974343)
+
+VRAM, hd 128, Hkv 8, 122880 keys: KvState 135 MiB per layer (tile 9216 B per 64 tokens per KV head, 144 B/token/head
+vs FP16 512 B). Llama-3.2-3B, 28 layers: 3780 MiB. Full requantization per chunk (`prefill`, own KV in `ws`): 135 MiB
+once. Bench `APA_CHUNKS=1`, 60 chunks x 2048, 3 reps interleaved (timing) and one `APA_FULL=1` run (accuracy):
+
+```
+r1 lc_122880_0 chunks 60 x 2048 eps 5e-03: full requant 219.32 ms cos 0.999793 min 0.987297 | incremental 210.66 ms cos 0.999794 min 0.988149
+r1 lc_122880_0 chunks 60 x 2048 eps 1e-02: full requant 190.11 ms cos 0.999718 min 0.983161 | incremental 181.68 ms cos 0.999708 min 0.984206
+r1 lc_122880_1 chunks 60 x 2048 eps 5e-03: full requant 225.97 ms cos 0.999974 min 0.998137 | incremental 217.16 ms cos 0.999973 min 0.998111
+r1 lc_122880_1 chunks 60 x 2048 eps 1e-02: full requant 200.08 ms cos 0.999969 min 0.999116 | incremental 190.76 ms cos 0.999967 min 0.999071
+r1 lc_122880_2 chunks 60 x 2048 eps 5e-03: full requant 220.67 ms cos 0.999930 min 0.995700 | incremental 212.57 ms cos 0.999929 min 0.994464
+r1 lc_122880_2 chunks 60 x 2048 eps 1e-02: full requant 199.19 ms cos 0.999859 min 0.990674 | incremental 190.02 ms cos 0.999862 min 0.994464
+r2 lc_122880_0 chunks 60 x 2048 eps 5e-03: full requant 220.28 ms cos 0.999793 min 0.987297 | incremental 212.02 ms cos 0.999794 min 0.988149
+r2 lc_122880_0 chunks 60 x 2048 eps 1e-02: full requant 190.41 ms cos 0.999718 min 0.983161 | incremental 181.64 ms cos 0.999708 min 0.984206
+r2 lc_122880_1 chunks 60 x 2048 eps 5e-03: full requant 225.86 ms cos 0.999974 min 0.998137 | incremental 216.85 ms cos 0.999973 min 0.998111
+r2 lc_122880_1 chunks 60 x 2048 eps 1e-02: full requant 200.20 ms cos 0.999969 min 0.999116 | incremental 191.01 ms cos 0.999967 min 0.999071
+r2 lc_122880_2 chunks 60 x 2048 eps 5e-03: full requant 220.65 ms cos 0.999930 min 0.995700 | incremental 211.99 ms cos 0.999929 min 0.994464
+r2 lc_122880_2 chunks 60 x 2048 eps 1e-02: full requant 199.78 ms cos 0.999859 min 0.990674 | incremental 189.60 ms cos 0.999862 min 0.994464
+r3 lc_122880_0 chunks 60 x 2048 eps 5e-03: full requant 220.48 ms cos 0.999793 min 0.987297 | incremental 210.90 ms cos 0.999794 min 0.988149
+r3 lc_122880_0 chunks 60 x 2048 eps 1e-02: full requant 190.69 ms cos 0.999718 min 0.983161 | incremental 181.16 ms cos 0.999708 min 0.984206
+r3 lc_122880_1 chunks 60 x 2048 eps 5e-03: full requant 226.19 ms cos 0.999974 min 0.998137 | incremental 216.89 ms cos 0.999973 min 0.998111
+r3 lc_122880_1 chunks 60 x 2048 eps 1e-02: full requant 200.57 ms cos 0.999969 min 0.999116 | incremental 191.06 ms cos 0.999967 min 0.999071
+r3 lc_122880_2 chunks 60 x 2048 eps 5e-03: full requant 220.18 ms cos 0.999930 min 0.995700 | incremental 212.11 ms cos 0.999929 min 0.994464
+r3 lc_122880_2 chunks 60 x 2048 eps 1e-02: full requant 198.87 ms cos 0.999859 min 0.990674 | incremental 189.85 ms cos 0.999862 min 0.994464
+```
+
+```
+lc_122880_0 eps 0.005 prefill: full eps    5e-03: pairs 49152 pooled cos 0.999794 mean cos 0.999117 min 0.984284 | cos<0.99 887 cos<0.9 0 cos<0 0
+lc_122880_0 eps 0.005 last chunk full requant: pooled cos 0.999794 mean cos 0.999117 min 0.984284 cos<0.9 0 cos<0 0
+lc_122880_0 eps 0.005 last chunk incremental: pooled cos 0.999797 mean cos 0.999152 min 0.985540 cos<0.9 0 cos<0 0
+lc_122880_0 eps 0.01 prefill: full eps    1e-02: pairs 49152 pooled cos 0.999720 mean cos 0.998778 min 0.978066 | cos<0.99 1922 cos<0.9 0 cos<0 0
+lc_122880_0 eps 0.01 last chunk full requant: pooled cos 0.999720 mean cos 0.998778 min 0.978066 cos<0.9 0 cos<0 0
+lc_122880_0 eps 0.01 last chunk incremental: pooled cos 0.999719 mean cos 0.998816 min 0.979962 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.005 prefill: full eps    5e-03: pairs 49152 pooled cos 0.999973 mean cos 0.999959 min 0.997452 | cos<0.99 0 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.005 last chunk full requant: pooled cos 0.999973 mean cos 0.999959 min 0.997452 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.005 last chunk incremental: pooled cos 0.999973 mean cos 0.999958 min 0.997474 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.01 prefill: full eps    1e-02: pairs 49152 pooled cos 0.999969 mean cos 0.999952 min 0.998670 | cos<0.99 0 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.01 last chunk full requant: pooled cos 0.999969 mean cos 0.999952 min 0.998670 cos<0.9 0 cos<0 0
+lc_122880_1 eps 0.01 last chunk incremental: pooled cos 0.999968 mean cos 0.999951 min 0.998531 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.005 prefill: full eps    5e-03: pairs 49152 pooled cos 0.999927 mean cos 0.999769 min 0.986760 | cos<0.99 4 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.005 last chunk full requant: pooled cos 0.999927 mean cos 0.999769 min 0.986760 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.005 last chunk incremental: pooled cos 0.999927 mean cos 0.999732 min 0.985519 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.01 prefill: full eps    1e-02: pairs 49152 pooled cos 0.999869 mean cos 0.999721 min 0.976934 | cos<0.99 13 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.01 last chunk full requant: pooled cos 0.999869 mean cos 0.999721 min 0.976934 cos<0.9 0 cos<0 0
+lc_122880_2 eps 0.01 last chunk incremental: pooled cos 0.999870 mean cos 0.999684 min 0.981255 cos<0.9 0 cos<0 0
+```
+
+| Dump | eps | full requant ms | incremental ms | delta | per chunk | min cos full / incr (all pairs) |
+|---|---|---|---|---|---|---|
+| lc_122880_0 | 0.005 | 220.03 | 211.19 | +4.18 % | +0.147 ms | 0.984284 / 0.985540 |
+| lc_122880_0 | 0.01 | 190.40 | 181.49 | +4.91 % | +0.149 ms | 0.978066 / 0.979962 |
+| lc_122880_1 | 0.005 | 226.01 | 216.97 | +4.17 % | +0.151 ms | 0.997452 / 0.997474 |
+| lc_122880_1 | 0.01 | 200.28 | 190.94 | +4.89 % | +0.156 ms | 0.998670 / 0.998531 |
+| lc_122880_2 | 0.005 | 220.50 | 212.22 | +3.90 % | +0.138 ms | 0.986760 / 0.985519 |
+| lc_122880_2 | 0.01 | 199.28 | 189.82 | +4.98 % | +0.158 ms | 0.976934 / 0.981255 |
+
+Means of 3 reps, rep spread <= 1.4 ms. Full requantization of the last chunk equals `prefill` on the dump (same
+pooled / mean / min), so its cos<0.99 is the prefill line (887, 1922, 0, 0, 4, 13); the incremental summary has no
+cos<0.99 count. Higher min cos: full 2 of 6, incremental 4 of 6; cos<0.9: 0 everywhere. Dense chunk path only, not
+the imp sparse call; share of imp prefill not measured.
