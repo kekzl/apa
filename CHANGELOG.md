@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Docs: imp prefill / PPL with 0.6.0 at eps 0.01 and 0.005 (relayed, kekzl/imp#2648). Llama-3.2-3B, 106451 tokens,
+  eps 0.005 default sparse prefill, means: 5359.98 -> 5666.82 ms vs 0.5.0; dense +0.6 %.
+
 ## 0.6.0 (2026-10-09)
 
 - Prep: UE4M3 block scale per 16 values (Q both terms, K, V) = the code in nearest(amax / 6) - 2 .. + 6 with the least

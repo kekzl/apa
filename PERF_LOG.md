@@ -2876,3 +2876,19 @@ ra2dump_87 b060 rep 1: hot 38.8 % attn 0.323 ms prep 0.059 ms
 ra2dump_87 b040 rep 2: hot 42.3 % attn 0.296 ms prep 0.037 ms 
 ra2dump_87 b060 rep 2: hot 38.8 % attn 0.321 ms prep 0.060 ms 
 ```
+
+## 2026-10-09 imp prefill / PPL on APA 0.6.0 (measured by session ra2-fc, relayed message, no log here)
+
+```
+imp numbers for APA 0.6.0, kekzl/imp#2648 (base 2934f575, RTX 5090, dev build, apa_min_kv 8192).
+PPL ppl_corpus_45k_gemma4_turn, main (0.5.0) -> 0.6.0 (FA2 10.7974 / 17.3644):
+- Qwen3-8B Q8_0, eps 0.01: 10.7972 -> 10.7971; eps 0.005: 10.8071 -> 10.7965
+- Llama-3.2-3B Q8_0, eps 0.01: 17.3679 -> 17.3704; eps 0.005: 17.3663 -> 17.3655
+Prefill Llama-3.2-3B Q8_0, 106451 tokens, --max-seq-len 108000, ms rep1 / rep2, 0.5.0 -> 0.6.0:
+- eps 0.01 sparse 4946.49 / 5005.64 -> 5056.78 / 5029.35; dense 6703.86 / 6669.97 -> 6730.54 / 6874.74
+- eps 0.005 sparse 5242.15 / 5477.81 -> 5594.75 / 5738.88; dense 7705.54 / 7685.13 -> 7763.12 / 7725.78
+Note: eps 0.005 sparse +5.7 % (means) is more than the prep delta you measured; default sparse prefill runs prep per call, so the per-call prep cost adds up. FA2 at the same prompt (0.5.0 run): sparse 7180.71 / 7025.34, dense 11884.58 / 11902.36. No NIAH.
+```
+
+Hot share, 0.5.0 -> 0.6.0, same run (Phase 9, qs4): lc_122880_2 first 8192 keys 17.0 -> 19.2 %, first 4096 keys
+19.2 -> 21.0 %, ra2dump_59 61.2 -> 66.8 %, ra2dump_78 60.2 -> 63.8 %, lc_32768_2 17.1 -> 18.2 %.
