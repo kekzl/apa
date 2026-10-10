@@ -3420,3 +3420,37 @@ Means of 3 reps, rep spread <= 1.4 ms. Full requantization of the last chunk equ
 pooled / mean / min), so its cos<0.99 is the prefill line (887, 1922, 0, 0, 4, 13); the incremental summary has no
 cos<0.99 count. Higher min cos: full 2 of 6, incremental 4 of 6; cos<0.9: 0 everywhere. Dense chunk path only, not
 the imp sparse call; share of imp prefill not measured.
+
+## 2026-10-10 imp dense prefill, attention.apa_tile_cache off (default since kekzl/imp#2640) vs on
+
+imp-apa04 build-dev 77c766ca (APA 0.6.1), imp:toolchain, Llama-3.2-3B Q8_0, long8.txt (106451 tokens),
+`--max-seq-len 108000 --max-tokens 1 --set attention.sparse_prefill_topk_tokens=0`, 4 reps interleaved. Last
+column: `apa prefill: first ... call` (path proof). T2 demand: `apakv 3323.4 MiB` on, `0.0 MiB` off; KV pool 6750
+blocks (11812.5 MiB) in both.
+
+```
+r1 eps 0.01 tile_cache false rc 0 | in  6773.25 ms | paged call
+r1 eps 0.01 tile_cache true rc 0 | in  6568.43 ms | paged cached call
+r1 eps 0.005 tile_cache false rc 0 | in  7128.36 ms | paged call
+r1 eps 0.005 tile_cache true rc 0 | in  6898.06 ms | paged cached call
+r2 eps 0.01 tile_cache false rc 0 | in  6689.25 ms | paged call
+r2 eps 0.01 tile_cache true rc 0 | in  6515.36 ms | paged cached call
+r2 eps 0.005 tile_cache false rc 0 | in  7126.80 ms | paged call
+r2 eps 0.005 tile_cache true rc 0 | in  6967.23 ms | paged cached call
+r3 eps 0.01 tile_cache false rc 0 | in  7197.21 ms | paged call
+r3 eps 0.01 tile_cache true rc 0 | in  7287.84 ms | paged cached call
+r3 eps 0.005 tile_cache false rc 0 | in  7212.47 ms | paged call
+r3 eps 0.005 tile_cache true rc 0 | in  7011.56 ms | paged cached call
+r4 eps 0.01 tile_cache false rc 0 | in  6786.10 ms | paged call
+r4 eps 0.01 tile_cache true rc 0 | in  6471.90 ms | paged cached call
+r4 eps 0.005 tile_cache false rc 0 | in  7048.34 ms | paged call
+r4 eps 0.005 tile_cache true rc 0 | in  6847.73 ms | paged cached call
+```
+
+| eps | off (default) | on | off - on |
+|---|---|---|---|
+| 0.01 | 6861.45 (6689.25..7197.21) | 6710.88 (6471.90..7287.84) | +150.57 ms, +2.24 % |
+| 0.005 | 7128.99 (7048.34..7212.47) | 6931.15 (6847.73..7011.56) | +197.84 ms, +2.85 % |
+
+Mean (min..max) ms. Per pair off slower in 7 of 8 (+2.29 to +4.85 %); r3 eps 0.01 -1.24 % (both arms ~7200 ms).
+Bench per layer +3.9 to +5.0 % (entry above) -> +2.2 to +2.9 % of imp dense prefill. Sparse prefill runs uncached.
