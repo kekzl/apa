@@ -8,8 +8,32 @@
 #include <type_traits>
 
 #include "apa_attn.cuh"
+#include "apa_prep.cuh"
 
 namespace apa {
+
+// bench: per item (start, waits done, end) in globaltimer ns, (type 0 quant / 1 pass 1 / 2 pass 2, k, r, SM)
+#ifdef APA_TRACE
+struct TraceRec {
+  unsigned long long t0, t1, t2, info;
+};
+__device__ TraceRec* g_apa_trace;
+__device__ unsigned g_apa_trace_n, g_apa_trace_cap;
+__device__ uint64_t g_apa_tw[1024];  // per CTA: pass-2 wait done
+__device__ __forceinline__ uint64_t gtime() {
+  uint64_t t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
+__device__ __forceinline__ void trace(uint64_t t0, uint64_t t1, int type, int k, int r) {
+  if (threadIdx.x != 0 || g_apa_trace == nullptr) return;
+  unsigned sm;
+  asm("mov.u32 %0, %%smid;" : "=r"(sm));
+  const unsigned i = atomicAdd(&g_apa_trace_n, 1u);
+  if (i < g_apa_trace_cap)
+    g_apa_trace[i] = TraceRec{t0, t1, gtime(), ((uint64_t)type << 56) | ((uint64_t)sm << 40) | ((uint64_t)k << 20) | r};
+}
+#endif
 
 // f16 x f16 -> f16 accumulate (full-rate HMMA on sm_120, as imp's FA2 default): d/c are two half2 registers.
 __device__ __forceinline__ void mma_f16h(uint32_t* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
@@ -139,16 +163,6 @@ __device__ __forceinline__ void row_shift(const uint32_t (&qa)[8][4], const floa
   sh_hi *= qmul;
 }
 
-// Spin until pass-1 CTA of this q block published (fused launch: pass-1 items may still run).
-__device__ __forceinline__ void wait_ready(const uint32_t* rdy) {
-  uint32_t v;
-  for (;;) {
-    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(rdy) : "memory");
-    if (v) return;
-    __nanosleep(500);
-  }
-}
-
 // Next tile after t in the union of NW warps' masks (W words each); -1 at t_end.
 template <int NW>
 __device__ __forceinline__ int next_tile(const uint32_t* whot0, int W, int t, int t_end) {
@@ -248,7 +262,7 @@ __device__ __forceinline__ void pv16(Rows2& w, const float (&s)[8][4], uint32_t 
 template <typename T>
 __device__ __forceinline__ void merge_row(const Rows2& w, int half, const Pass1Out& p1, T* O, const Dims& dm,
                                           int b, int hk, int r, int T0) {
-  const size_t qrow = (size_t)(b * dm.Hkv + hk) * dm.R + r;
+  const size_t qrow = (size_t)(b * dm.Hkv + hk) * p1.rp + r;
   const float m2 = half ? w.m_hi : w.m_lo, l2 = half ? w.l_hi : w.l_lo;
   const float2 ml1 = p1.ml[qrow];
   const float M = fmaxf(ml1.x, m2);
@@ -349,7 +363,10 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
   w.l_lo = w.l_hi = 0.f;
   bool mine_any = false;
 
-  if (tid == 0) wait_ready(p1.ready + bhk * nqb + qb);
+  if (tid == 0) wait_geq(p1.ready + bhk * nqb + qb, p1.nseg);  // fused launch: pass-1 items may still run
+#ifdef APA_TRACE
+  if (tid == 0) g_apa_tw[blockIdx.x & 1023] = gtime();
+#endif
   __syncthreads();
   const int lm_i = lane >> 3, lm_r = lane & 7;
   const int t_end = min(dm.ntkv, CAUSAL ? p_cmax / BKV + 1 : dm.ntkv);
@@ -384,26 +401,153 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
   if (r_hi < R) merge_row(w, 1, p1, O, dm, b, hk, r_hi, T0);
 }
 
-// Both passes in one launch (hd 128, 12 warps). Each CTA takes a ticket: tickets < n1 run pass 1 on a q block,
-// the rest run pass 2 on whole pass-1 q blocks (pass2_cta). Tickets go to running CTAs in order, so the
-// pass-1 item a pass-2 CTA waits on is resident (no deadlock); pass 2 fills the SMs of pass 1's last wave.
+// KV window: quant items fill WIN_SLOTS ring slots of S tiles per (b, kv head) ahead of the pass-1 segments
+// that read them. kv == nullptr: KV holds every tile (stride kvcap), one segment, no quant items.
+// Ring slots: segment k + 1 reuses the slot of k + 1 - WIN_SLOTS. 3: its quant items go before pass 1 of segment k
+// (k - 2 is done by then); 2: after half of them (k - 1 done by then).
+#ifndef APA_WIN_SLOTS
+#define APA_WIN_SLOTS 2
+#endif
+constexpr int WIN_SLOTS = APA_WIN_SLOTS;
+constexpr int WIN_QT = 9;     // tiles per quant item (3 passes of 3 tiles)
+struct Win {
+  uint8_t* kv;       // sink tile per (b, kv head), then WIN_SLOTS slots of [bhk][S] tiles
+  uint32_t* qdone;   // [nseg][bhk] quant items done
+  uint32_t* pdone;   // [nseg][bhk] pass-1 CTAs done
+  int* ovf;          // quant overflow flag (sampled stats too narrow), nullptr: not checked
+  int S, nseg, qpb;  // tiles per segment, segments, quant items per (segment, b, kv head)
+};
+// Segment k: tiles [lo, hi), hi = ntkv - k * S (tile 0: sink, quantized with segment 0).
+__host__ __device__ inline int seg_hi(int k, int ntkv, int S) { return ntkv - k * S; }
+__host__ __device__ inline int seg_lo(int k, int ntkv, int S) {
+  const int lo = ntkv - (k + 1) * S;
+  return lo > 1 ? lo : 1;
+}
+
+// Quant item r of segment k: WIN_QT tiles of one (b, kv head) into slot k % WIN_SLOTS (item 0 of k = 0: + sink).
+template <typename RS>
+__device__ __forceinline__ void quant_item(const RS& rs, const Dims& dm, const float* __restrict__ ksum,
+                                           const HeadScale* __restrict__ hs, const Win& wn, int k, int r, int nqb,
+                                           uint8_t* smem) {
+  constexpr int D = 128, TILE = Cfg<D>::TILE, NT = 384;
+  const int bhkn = dm.B * dm.Hkv, bhk = r / wn.qpb, j = r % wn.qpb, b = bhk / dm.Hkv, hk = bhk % dm.Hkv;
+  const int tid = threadIdx.x, lo = seg_lo(k, dm.ntkv, wn.S), hi = seg_hi(k, dm.ntkv, wn.S);
+#ifdef APA_TRACE
+  const uint64_t tr0 = gtime();
+#endif
+  if (tid == 0 && k >= WIN_SLOTS) wait_geq(wn.pdone + (size_t)(k - WIN_SLOTS) * bhkn + bhk, nqb);
+#ifdef APA_TRACE
+  const uint64_t tr1 = gtime();
+#endif
+  float* kmean = reinterpret_cast<float*>(smem);
+  auto vt = reinterpret_cast<__half (*)[D + 2]>(smem + D * 4);
+  for (int d = tid; d < D; d += NT) kmean[d] = ksum[(size_t)bhk * D + d];
+  __syncthreads();
+  const HeadScale sc = hs[bhk];
+  uint8_t* slot = wn.kv + ((size_t)bhkn + (size_t)(k % WIN_SLOTS) * bhkn * wn.S + (size_t)bhk * wn.S) * TILE;
+  const int t0 = lo + j * WIN_QT, t1 = min(hi, t0 + WIN_QT);
+  float amx = 0.f;
+  if (k == 0 && j == 0) {  // the sink tile 0
+    amx = quant_tile<D>(rs, dm, kmean, sc.k, sc.v, wn.kv + (size_t)bhk * TILE, b, hk, 0, 1, tid, NT, vt);
+    __syncthreads();  // vt read by every thread
+  }
+  for (int t = t0; t < t1; t += 3) {  // 3 tiles per pass: 1536 groups on 384 threads
+    const int nb = min(3, t1 - t);
+    uint8_t* blob = slot + (size_t)(t - lo) * TILE;
+    amx = fmaxf(amx, quant_tile<D>(rs, dm, kmean, sc.k, sc.v, blob, b, hk, t, nb, tid, NT, vt));
+    __syncthreads();
+  }
+  if (wn.ovf != nullptr && __syncthreads_or(!(amx <= P_SCALE)) && tid == 0) atomicOr(wn.ovf, 1);  // NaN / inf too
+  fence_proxy_async();  // the tiles go to bulk copies
+  __threadfence();
+  __syncthreads();
+  if (tid == 0) add_release(wn.qdone + (size_t)k * bhkn + bhk, 1);
+#ifdef APA_TRACE
+  trace(tr0, tr1, 0, k, r);
+#endif
+}
+
+// Both passes in one persistent launch (hd 128, 12 warps, grid <= SMs). A CTA takes tickets in order: per key
+// segment k, the quant items of segment k + 1, then pass 1 of segment k on every q block (segment 0 after the
+// quant items of segment 0); past the last pass-1 ticket it runs pass 2 on whole q blocks (pass2_cta). Every
+// wait (quant of k, segment k - 1 of the q block, slot reuse, pass 1 for pass 2) is on an earlier ticket, held by
+// a running CTA: no deadlock. Pass 2 fills the SMs of pass 1's last wave. gate: run only if *gate (redo).
 template <bool CAUSAL, typename T, typename RS>
 __global__ void __launch_bounds__(384, 1)
     apa_kernel(const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs, const float* __restrict__ Qr,
                const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q,
                RS rs, T* __restrict__ O, Dims dm, float qmul,
-               Pass1Out p1, int n1, int nqb, uint32_t* ticket) {
-  constexpr int NW = 12;
+               Pass1Out p1, int n1, int nqb, uint32_t* ticket, Win wn, const int* gate) {
+  constexpr int NW = 12, TILE = Cfg<128>::TILE;
   extern __shared__ __align__(128) uint8_t smem[];
   __shared__ int item_s;
-  if (threadIdx.x == 0) item_s = (int)atomicAdd(ticket, 1u);
-  __syncthreads();
-  const int item = item_s, i = item < n1 ? item : item - n1;
-  const int qx = i % nqb, hk = (i / nqb) % dm.Hkv, b = i / (nqb * dm.Hkv);
-  const int qb = CAUSAL ? nqb - 1 - qx : qx;  // heavy causal blocks first
-  if (item < n1) {
-    pass1_cta<128, NW, 6, CAUSAL, T>(Qq, Qs, Qr, KV, hs, O, dm, p1, b, hk, qb, nqb, smem);
-    return;
+  if (gate != nullptr && *gate == 0) return;
+  const int bhkn = dm.B * dm.Hkv, nq = (wn.kv != nullptr && n1 > 0) ? wn.qpb * bhkn : 0;
+  const int n_items = wn.nseg * (nq + n1);
+  for (;;) {
+    __syncthreads();  // previous item done in every thread: item_s and smem are free
+    if (threadIdx.x == 0) item_s = (int)atomicAdd(ticket, 1u);
+    __syncthreads();
+    const int x = item_s;
+    if (x >= n_items) break;
+    // ticket -> item: Q(0) | P(0)[0, n1a) Q(1) P(0)[n1a, n1) | P(1).. Q(2) .. | .. | P(nseg - 1)
+    const int n1a = WIN_SLOTS >= 3 ? 0 : n1 / 2;
+    int k = 0, r = x;
+    bool quant = x < nq;
+    if (!quant) {
+      const int y = x - nq;
+      k = y / (nq + n1);
+      r = y - k * (nq + n1);
+      quant = k < wn.nseg - 1 && r >= n1a && r < n1a + nq;
+      if (quant)
+        ++k, r -= n1a;
+      else if (k < wn.nseg - 1 && r >= n1a)
+        r -= nq;
+    }
+    if (quant) {
+      quant_item(rs, dm, p1.ksum, hs, wn, k, r, nqb, smem);
+      continue;
+    }
+    const int qx = r % nqb, hk = (r / nqb) % dm.Hkv, b = r / (nqb * dm.Hkv), bhk = b * dm.Hkv + hk;
+    const int qb = CAUSAL ? nqb - 1 - qx : qx;  // heavy causal blocks first
+    Seg sg;
+#ifdef APA_TRACE
+    const uint64_t t0 = gtime();
+    uint64_t t1 = t0;
+#endif
+    if (wn.kv != nullptr) {
+      if (threadIdx.x == 0) {
+        if (k > 0) wait_geq(p1.ready + bhk * nqb + qb, k);  // segment k - 1 of this q block
+        wait_geq(wn.qdone + (size_t)k * bhkn + bhk, wn.qpb);
+        fence_proxy_async();
+      }
+      __syncthreads();
+#ifdef APA_TRACE
+      t1 = gtime();
+#endif
+      sg.sink = wn.kv + (size_t)bhk * TILE;
+      sg.lo = seg_lo(k, dm.ntkv, wn.S);
+      sg.hi = seg_hi(k, dm.ntkv, wn.S);
+      sg.seg = wn.kv + ((size_t)bhkn + (size_t)(k % WIN_SLOTS) * bhkn * wn.S + (size_t)bhk * wn.S) * TILE;
+    } else {
+      sg.sink = KV + (size_t)bhk * dm.kvcap * TILE;
+      sg.seg = sg.sink + TILE;
+      sg.lo = 1;
+      sg.hi = dm.ntkv;
+    }
+    sg.first = k == 0;
+    sg.last = k == wn.nseg - 1;
+    pass1_cta<128, NW, 6, CAUSAL, T>(Qq, Qs, Qr, sg, hs, O, dm, p1, b, hk, qb, nqb, smem);
+    // publish: every thread fences its writes (O, part, ml, carry, masks), then release adds
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      add_release(p1.ready + bhk * nqb + qb, 1);
+      if (wn.pdone != nullptr) add_release(wn.pdone + (size_t)k * bhkn + bhk, 1);
+    }
+#ifdef APA_TRACE
+    trace(t0, t1, 1, k, r);
+#endif
   }
   // pass-2 worker: whole q blocks from ticket[1], all 12 warps on one tile stream
   __shared__ P2Stream ps;
@@ -425,8 +569,14 @@ __global__ void __launch_bounds__(384, 1)
     __syncthreads();
     const int j = item_s;
     if (j >= n2) return;
+#ifdef APA_TRACE
+    const uint64_t t0 = gtime();
+#endif
     const int jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
     pass2_cta<NW, CAUSAL, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem, u);
+#ifdef APA_TRACE
+    trace(t0, g_apa_tw[blockIdx.x & 1023], 2, 0, j);
+#endif
   }
 }
 

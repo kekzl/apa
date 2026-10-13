@@ -193,6 +193,22 @@ __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t
       "l"(src), "r"(bytes), "r"(bar)
       : "memory");
 }
+__device__ __forceinline__ void mbar_inval(uint32_t bar) {
+  asm volatile("mbarrier.inval.shared::cta.b64 [%0];" ::"r"(bar) : "memory");
+}
+// Generic-proxy writes (global: other CTAs, acquired; shared: this CTA) before bulk copies touch them.
+__device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.async;" ::: "memory"); }
+__device__ __forceinline__ void add_release(uint32_t* p, uint32_t v) {
+  asm volatile("red.release.gpu.global.add.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
+}
+// Spin until *p >= v (acquire).
+__device__ __forceinline__ void wait_geq(const uint32_t* p, uint32_t v) {
+  for (uint32_t x;;) {
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(x) : "l"(p) : "memory");
+    if (x >= v) return;
+    __nanosleep(500);
+  }
+}
 
 
 // Problem geometry shared by prep and attention. Q/O: [B][Sq][H][D]; GQA group G = H / Hkv.

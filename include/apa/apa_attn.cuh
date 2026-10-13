@@ -9,15 +9,17 @@
 namespace apa {
 
 // Pass-1 outputs. Masks: one bit per KV tile, W words per warp (warp id = (bhk * nqb + qb) * NW + warp)
-// (zeroed before pass 1). part/ml: packed rows (bhk * R + r).
+// (zeroed before pass 1). part/ml/carry: packed rows (bhk * rp + r), rp = nqb * BQ (rows past R kept).
 struct Pass1Out {
   float eps;
   int W;
   uint32_t* warp_hot;
-  uint32_t* ready;    // [bhk * nqb + qb] != 0: pass-1 CTA finished (release); pass 2 acquires it
-  float* part;        // [rows][D]: sum over cold tiles of p * v, p relative to m
+  uint32_t* ready;    // [bhk * nqb + qb]: pass-1 segments done (release adds); pass 2 waits for nseg
+  float* part;        // [rows][D]: sum over cold tiles of p * v, p relative to m (between segments: raw o)
   float2* ml;         // [rows]: (m, sum over cold tiles of p), log2 domain
   const float* ksum;  // [bhk][D] K column mean (finalized): pass 1 scores are q.(k - kmean), pass 2 must match
+  float4* carry;      // [rows]: (m, la, ol, ms) between pass-1 segments
+  int rp, nseg;       // row stride per (b, kv head); pass-1 key segments
 #ifdef APA_DBG
   float4* dbg;  // [rows]: (m, lambda, l_cold, max tile share at test time), lambda / l_cold in ml units
 #endif
@@ -287,12 +289,13 @@ __device__ __forceinline__ void p1_epilogue(const Rows<Cfg<D>::DT>& w, bool any_
   constexpr int DT = Cfg<D>::DT;
   const int R = dm.R, G = dm.G, r_hi = r_lo + 8;
   const bool ok_lo = r_lo < R, ok_hi = r_hi < R;
-  const size_t qb_row = (size_t)(b * dm.Hkv + hk) * R;
+  const size_t qb_row = (size_t)(b * dm.Hkv + hk) * out.rp;
 #ifdef APA_DBG
   if (T0 == 0 && out.dbg != nullptr) {
     constexpr float u = (TAU > 0.f ? 16.f : 1.f) / 1536.f;
-    if (ok_lo) out.dbg[qb_row + r_lo] = make_float4(w.m_lo, w.la_lo * u, w.ol[0] * u, w.ms_lo);
-    if (ok_hi) out.dbg[qb_row + r_hi] = make_float4(w.m_hi, w.la_hi * u, w.ol[2] * u, w.ms_hi);
+    const size_t dr = (size_t)(b * dm.Hkv + hk) * R;
+    if (ok_lo) out.dbg[dr + r_lo] = make_float4(w.m_lo, w.la_lo * u, w.ol[0] * u, w.ms_lo);
+    if (ok_hi) out.dbg[dr + r_hi] = make_float4(w.m_hi, w.la_hi * u, w.ol[2] * u, w.ms_hi);
   }
 #endif
   if (any_hot) {
@@ -326,12 +329,20 @@ __device__ __forceinline__ void p1_epilogue(const Rows<Cfg<D>::DT>& w, bool any_
 #ifndef APA_ORDER
 #define APA_ORDER 1
 #endif
-__device__ __forceinline__ int tile_at(int i, int ntiles) { return (APA_ORDER == 0 || i == 0) ? i : ntiles - i; }
 
-// Bulk-copy pipeline (thread 0 = producer): STAGES slots, full/empty mbarriers.
-template <int NW, int STAGES, int TILE>
-__device__ __forceinline__ void pipe_init(uint32_t full0, uint32_t empty0, uint32_t sbase, const uint8_t* kv,
-                                          int ntiles) {
+// Pass-1 key segment of a CTA: tile 0 (sink) when first, then tiles hi - 1 .. lo (one segment: lo 1, hi ntkv).
+// Tile t sits at sink (t == 0) or seg + (t - lo) * TILE. Segments k = 0, 1, .. walk the keys downwards; the row
+// state crosses them in part / carry, so the tile order and every value equal one pass over all tiles.
+struct Seg {
+  const uint8_t* sink;
+  const uint8_t* seg;
+  int lo, hi;
+  bool first, last;
+};
+
+// Bulk-copy pipeline (thread 0 = producer): STAGES slots, full/empty mbarriers; src(i) = step i's tile.
+template <int NW, int STAGES, int TILE, typename Src>
+__device__ __forceinline__ void pipe_init(uint32_t full0, uint32_t empty0, uint32_t sbase, const Src& src, int n) {
   if (threadIdx.x == 0) {
     for (int s = 0; s < STAGES; ++s) {
       mbar_init(full0 + s * 8, 1);
@@ -341,9 +352,9 @@ __device__ __forceinline__ void pipe_init(uint32_t full0, uint32_t empty0, uint3
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    for (int s = 0; s < STAGES && s < ntiles; ++s) {
+    for (int s = 0; s < STAGES && s < n; ++s) {
       mbar_expect_tx(full0 + s * 8, TILE);
-      bulk_g2s(sbase + s * TILE, kv + (size_t)tile_at(s, ntiles) * TILE, TILE, full0 + s * 8);
+      bulk_g2s(sbase + s * TILE, src(s), TILE, full0 + s * 8);
     }
   }
 }
@@ -365,10 +376,11 @@ __device__ __forceinline__ void warp_q_init(WarpQ<D>& q, const uint8_t* Qq, cons
   q.v_lane = C::K_BYTES + ((lm_i >> 1) * 8 + lm_r) * 32 + v_swz(lm_r, lm_i & 1) * 16;  // + dp * 512
 }
 
-// One CTA: BQ packed rows (q block qb) of one (b, kv head); K/V tiles shared by its G q heads.
+// One CTA: BQ packed rows (q block qb) of one (b, kv head) over the key segment sg; K/V tiles shared by its G q
+// heads. A segment without tiles of this CTA (not the last) leaves the carried state as is.
 template <int D, int NW, int STAGES, bool CAUSAL, typename OutT>
 __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs,
-                                          const float* __restrict__ Qr, const uint8_t* __restrict__ KV,
+                                          const float* __restrict__ Qr, const Seg& sg,
                                           const HeadScale* __restrict__ hs, OutT* __restrict__ O, const Dims& dm,
                                           const Pass1Out& out, int b, int hk, int qb, int nqb, uint8_t* smem) {
   static_assert(D == 128, "APA pass 1: hd 128 (K fragments preloaded, x4 ldmatrix)");
@@ -383,11 +395,17 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
   const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;
   const int p_cmax = dm.q_offset + (min((qb + 1) * BQ, R) - 1) / G;  // last position in the CTA
   const int ntiles = CAUSAL ? min((p_cmax + BKV) / BKV, dm.ntkv) : dm.ntkv;
-  const uint8_t* kv = KV + (size_t)bhk * dm.kvcap * TILE;
+  const int first = sg.first ? 1 : 0, top = min(sg.hi, ntiles), n = first + max(0, top - sg.lo);
+  if (n == 0 && !sg.last) return;
+  auto tile_of = [&](int i) { return APA_ORDER == 0 ? i : i < first ? 0 : top - 1 - (i - first); };
+  auto src = [&](int i) {
+    const int t = tile_of(i);
+    return t == 0 ? sg.sink : sg.seg + (size_t)(t - sg.lo) * TILE;
+  };
   const uint32_t sbase = (uint32_t)__cvta_generic_to_shared(smem);
   const uint32_t full0 = (uint32_t)__cvta_generic_to_shared(full);
   const uint32_t empty0 = (uint32_t)__cvta_generic_to_shared(empty);
-  pipe_init<NW, STAGES, TILE>(full0, empty0, sbase, kv, ntiles);
+  pipe_init<NW, STAGES, TILE>(full0, empty0, sbase, src, n);
 
   const int r_lo = row0 + (lane >> 2);  // this lane's packed rows: r_lo, r_lo + 8
   const size_t qb_row = (size_t)bhk * R;
@@ -412,9 +430,27 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
 #endif
   bool any_hot = false;  // warp-uniform
   uint32_t* whot = out.warp_hot + ((size_t)(bhk * nqb + qb) * NW + warp) * out.W;
+  // row state between segments, all 16 rows of a valid warp (rows past R steer its warp-wide votes too)
+  const size_t c_lo = (size_t)bhk * out.rp + r_lo, c_hi = c_lo + 8;
+  float* o_lo = out.part + c_lo * D + q.T0 * 2;
+  float* o_hi = out.part + c_hi * D + q.T0 * 2;
+  if (valid && !sg.first) {
+    const float4 a = out.carry[c_lo], h = out.carry[c_hi];
+    w.m_lo = a.x, w.la_lo = a.y, w.ol[0] = w.ol[1] = a.z;  // ol[1], ol[3]: same sums, never read
+    w.m_hi = h.x, w.la_hi = h.y, w.ol[2] = w.ol[3] = h.z;
+#ifdef APA_DBG
+    w.ms_lo = a.w, w.ms_hi = h.w;
+#endif
+#pragma unroll
+    for (int dt = 0; dt < DT; ++dt) {
+      const float2 x = *reinterpret_cast<const float2*>(o_lo + dt * 8);
+      const float2 y = *reinterpret_cast<const float2*>(o_hi + dt * 8);
+      w.o[dt][0] = x.x, w.o[dt][1] = x.y, w.o[dt][2] = y.x, w.o[dt][3] = y.y;
+    }
+  }
 
-  for (int i = 0; i < ntiles; ++i) {
-    const int st = i % STAGES, t = tile_at(i, ntiles);
+  for (int i = 0; i < n; ++i) {
+    const int st = i % STAGES, t = tile_of(i);
     const uint32_t stage = sbase + st * TILE;
     mbar_wait(full0 + st * 8, (i / STAGES) & 1);
     if (valid && (!CAUSAL || t * BKV <= p_wmax) &&  // warp-uniform
@@ -423,18 +459,42 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
       any_hot = true;
     }
     mbar_arrive(empty0 + st * 8);
-    if (threadIdx.x == 0 && i + STAGES < ntiles) {
+    if (threadIdx.x == 0 && i + STAGES < n) {
       mbar_wait(empty0 + st * 8, (i / STAGES) & 1);
       mbar_expect_tx(full0 + st * 8, TILE);
-      bulk_g2s(stage, kv + (size_t)tile_at(i + STAGES, ntiles) * TILE, TILE, full0 + st * 8);
+      bulk_g2s(stage, src(i + STAGES), TILE, full0 + st * 8);
     }
   }
 
-  if (valid) p1_epilogue<D, OutT>(w, any_hot, out, O, dm, b, hk, sc.v, r_lo, q.T0);
-  // publish this CTA: every thread fences its writes (O, part, ml, masks), then one release store
-  __threadfence();
-  __syncthreads();
-  if (threadIdx.x == 0) asm volatile("st.release.gpu.global.u32 [%0], 1;" ::"l"(out.ready + bhk * nqb + qb) : "memory");
+  if (valid && !sg.last) {
+#pragma unroll
+    for (int dt = 0; dt < DT; ++dt) {
+      *reinterpret_cast<float2*>(o_lo + dt * 8) = make_float2(w.o[dt][0], w.o[dt][1]);
+      *reinterpret_cast<float2*>(o_hi + dt * 8) = make_float2(w.o[dt][2], w.o[dt][3]);
+    }
+#ifdef APA_DBG
+    const float ms_lo = w.ms_lo, ms_hi = w.ms_hi;
+#else
+    const float ms_lo = 0.f, ms_hi = 0.f;
+#endif
+    if (q.T0 == 0) {
+      out.carry[c_lo] = make_float4(w.m_lo, w.la_lo, w.ol[0], ms_lo);
+      out.carry[c_hi] = make_float4(w.m_hi, w.la_hi, w.ol[2], ms_hi);
+    }
+  } else if (valid) {
+    if (!sg.first) {  // hot tiles of earlier segments: this warp's mask bits
+      bool h = false;
+      for (int j = lane; j < out.W; j += 32) h |= whot[j] != 0u;
+      any_hot = __any_sync(~0u, h) || any_hot;
+    }
+    p1_epilogue<D, OutT>(w, any_hot, out, O, dm, b, hk, sc.v, r_lo, q.T0);
+  }
+  __syncthreads();  // every lane arrived: the barriers can go (a persistent CTA inits them again)
+  if (threadIdx.x == 0)
+    for (int s = 0; s < STAGES; ++s) {
+      mbar_inval(full0 + s * 8);
+      mbar_inval(empty0 + s * 8);
+    }
 }
 
 }  // namespace apa

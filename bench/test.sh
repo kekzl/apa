@@ -1,12 +1,15 @@
 #!/bin/sh
 # Test matrix on a GPU. DUMPS: dir of dump *.bin (all used), OUT: logs (build/test), IMAGE (imp:toolchain),
 # REF: optional bench binary in build/ of an earlier commit with the same kernel; outputs must match bitwise.
-# Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, all-pairs
-# accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats. Exit 1 on any failed check.
+# Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, KV window vs
+# every tile ahead, all-pairs accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats (window
+# redo on dumps over 12352 keys). Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed with APA_SAVE=file.
+# NOBUILD=1: reuse build/test_* (build them first without a GPU). Exit 1 on any failed check.
 set -u
 cd "$(dirname "$0")/.."
 DUMPS=${DUMPS:-../imp-ra2/build-dev}
 OUT=${OUT:-build/test}
+case "$OUT" in /*) echo "OUT must be relative to the repo (APA_OUT files go to /w/\$OUT)"; exit 1 ;; esac
 IMAGE=${IMAGE:-imp:toolchain}
 mkdir -p "$OUT"
 fail=0
@@ -27,13 +30,15 @@ has() { grep -qE "$2" "$OUT/$1.log"; }
 none() { ! grep -qE "$2" "$OUT/$1.log"; }
 
 for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" "pov:-DAPA_PREP_HEADROOM=0.015625f" \
-         "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX"; do
-  check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
+         "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" "ns3:-DAPA_WIN_SLOTS=3"; do
+  [ -n "${NOBUILD:-}" ] || check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
 done
 for f in "$DUMPS"/*.bin; do
   d=$(basename "$f" .bin)
-  run test_def "$d" "$d" -e APA_FULL=1 -e APA_EPS=0.005 -e APA_DET=1 -e APA_B2=1 -e APA_PAGED=16 -e APA_CHUNKS=2
+  run test_def "$d" "$d" -e APA_FULL=1 -e APA_EPS=0.005 -e APA_DET=1 -e APA_B2=1 -e APA_PAGED=16 -e APA_CHUNKS=2 \
+    -e APA_WIN=32,64,128
   check "$d run" has "$d" "^chunks incr"
+  check "$d window = every tile" none "$d" "^window S .* [1-9][0-9]* of [0-9]+ output elements differ"
   check "$d determinism" has "$d" "^determinism: 0 of"
   check "$d batch 2" has "$d" "batch 0 vs B=1 0, batch 1 vs -\(B=1\) 0 of"
   check "$d paged = flat" has "$d" "^paged vs flat: 0 of"
@@ -44,6 +49,9 @@ for f in "$DUMPS"/*.bin; do
   run test_pov "$d" "${d}_pov" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_pov
   run test_pp2 "$d" "${d}_pp2" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_pp2
   check "$d forced overflow redo = exact stats" cmp -s "$OUT/${d}_pov_0.005000" "$OUT/${d}_pp2_0.005000"
+  run test_ns3 "$d" "${d}_ns3" -e APA_EPS=0.005 -e APA_WIN=32,64,96
+  check "$d window, 3 slots run" has "${d}_ns3" "^window S 96"
+  check "$d window, 3 slots = every tile" none "${d}_ns3" "^window S .* [1-9][0-9]* of [0-9]+ output elements differ"
   if [ -n "${REF:-}" ]; then
     run "$REF" "$d" "${d}_ref" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ref
     run test_def "$d" "${d}_cur" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_cur

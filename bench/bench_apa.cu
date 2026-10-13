@@ -91,18 +91,58 @@ int main(int argc, char** argv) {
     std::printf("usage: bench_apa dump.bin\n");
     return 1;
   }
-  FILE* f = std::fopen(argv[1], "rb");
   int hdr[6];
-  if (!f || std::fread(hdr, 4, 6, f) != 6) return 1;
+  std::vector<T> hq, hk, hv;
+  if (std::strncmp(argv[1], "syn:", 4) == 0) {
+    // syn:n,kv,nh,nkv[,seed]: synthetic Q/K/V (no dump): N(0,1) plus K channel offsets, a sink key along a per-head
+    // direction that every query shares, chunk keys near their own query (diagonal mass). Not for accuracy claims.
+    int s[5] = {2048, 32768, 24, 8, 1};
+    std::sscanf(argv[1] + 4, "%d,%d,%d,%d,%d", s, s + 1, s + 2, s + 3, s + 4);
+    hdr[0] = s[0], hdr[1] = s[1], hdr[2] = s[2], hdr[3] = s[3], hdr[4] = 128, hdr[5] = s[1] - s[0];
+    const int G = s[2] / s[3], D = 128;
+    std::mt19937 g(s[4]);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<float> u((size_t)s[3] * D), mo((size_t)s[3] * D), q((size_t)s[0] * s[2] * D);
+    for (int h = 0; h < s[3]; ++h) {
+      float l = 0.f;
+      for (int d = 0; d < D; ++d) l += (u[h * D + d] = nd(g)) * u[h * D + d];
+      for (int d = 0; d < D; ++d) u[h * D + d] /= std::sqrt(l), mo[h * D + d] = 2.f * nd(g);
+    }
+    for (size_t i = 0; i < q.size(); ++i) q[i] = nd(g) + 3.f * u[(i / D % s[2]) / G * D + i % D];
+    hq.resize(q.size());
+    for (size_t i = 0; i < q.size(); ++i) hq[i] = __float2half(q[i]);
+    const size_t nk = (size_t)s[1] * s[3] * D;
+    hk.resize(nk), hv.resize(nk);
+    for (size_t i = 0; i < nk; ++i) {
+      const size_t j = i / ((size_t)s[3] * D), h = i / D % s[3], d = i % D;
+      float x = nd(g) + mo[h * D + d];
+      if (j == 0) x += 30.f * u[h * D + d];
+      if (j >= (size_t)hdr[5]) x += 0.5f * q[((j - hdr[5]) * s[2] + h * G) * D + d];
+      hk[i] = __float2half(x);
+      hv[i] = __float2half(nd(g));
+    }
+    if (const char* e = std::getenv("APA_SAVE")) {  // write it as a dump (other bench builds), then exit
+      FILE* f = std::fopen(e, "wb");
+      if (!f || std::fwrite(hdr, 4, 6, f) != 6 || std::fwrite(hq.data(), 2, hq.size(), f) != hq.size() ||
+          std::fwrite(hk.data(), 2, nk, f) != nk || std::fwrite(hv.data(), 2, nk, f) != nk)
+        return 1;
+      std::fclose(f);
+      return 0;
+    }
+  } else {
+    FILE* f = std::fopen(argv[1], "rb");
+    if (!f || std::fread(hdr, 4, 6, f) != 6) return 1;
+    const size_t nq = (size_t)hdr[0] * hdr[2] * hdr[4], nk = (size_t)hdr[1] * hdr[3] * hdr[4];
+    hq.resize(nq), hk.resize(nk), hv.resize(nk);
+    if (std::fread(hq.data(), 2, nq, f) != nq || std::fread(hk.data(), 2, nk, f) != nk ||
+        std::fread(hv.data(), 2, nk, f) != nk)
+      return 1;
+    std::fclose(f);
+  }
   const int n = hdr[0], nh = hdr[2], nkv = hdr[3], hd = hdr[4];
   int kv = hdr[1], off = hdr[5];
   if (hd != 128) return 1;
   const size_t nq = (size_t)n * nh * hd, nk = (size_t)kv * nkv * hd;
-  std::vector<T> hq(nq), hk(nk), hv(nk);
-  if (std::fread(hq.data(), 2, nq, f) != nq || std::fread(hk.data(), 2, nk, f) != nk ||
-      std::fread(hv.data(), 2, nk, f) != nk)
-    return 1;
-  std::fclose(f);
   if (const char* e = std::getenv("APA_KV")) {  // keep the first N keys, Q rows at N - n .. N - 1 (fixed-cost study)
     kv = std::max(n, std::min(kv, std::atoi(e)));
     off = kv - n;
@@ -771,6 +811,134 @@ int main(int argc, char** argv) {
     CK(cudaFree(kp));
     CK(cudaFree(vp));
     CK(cudaFree(dbt));
+  }
+  // APA_WIN=S (comma list): KV window of S tiles per segment vs every tile quantized ahead (win 0) at the last eps:
+  // prefill bitwise, time, workspace.
+  if (const char* e = std::getenv("APA_WIN")) {
+    const float eps = epss.back();
+    const size_t b0 = apa::workspace_bytes(p, true, 0);
+    std::vector<T> h0(nq), h1(nq);
+#ifdef APA_TRACE  // one traced call: SM time per item type (waits apart), pass-1 end, pass-2 span, idle SM time
+    auto traced = [&](const char* tag, auto fn) {
+      const unsigned cap = 1u << 20, zero = 0;
+      apa::TraceRec* dt;
+      CK(cudaMalloc(&dt, (size_t)cap * sizeof(apa::TraceRec)));
+      CK(cudaMemcpyToSymbol(apa::g_apa_trace, &dt, sizeof(dt)));
+      CK(cudaMemcpyToSymbol(apa::g_apa_trace_cap, &cap, 4));
+      CK(cudaMemcpyToSymbol(apa::g_apa_trace_n, &zero, 4));
+      fn();
+      CK(cudaDeviceSynchronize());
+      unsigned nt = 0;
+      CK(cudaMemcpyFromSymbol(&nt, apa::g_apa_trace_n, 4));
+      nt = std::min(nt, cap);
+      std::vector<apa::TraceRec> ht(nt);
+      CK(cudaMemcpy(ht.data(), dt, nt * sizeof(apa::TraceRec), cudaMemcpyDeviceToHost));
+      apa::TraceRec* nul = nullptr;
+      CK(cudaMemcpyToSymbol(apa::g_apa_trace, &nul, sizeof(nul)));
+      CK(cudaFree(dt));
+      unsigned long long t_min = ~0ull, t_max = 0, p1_end = 0, p2_beg = ~0ull, p2_end = 0;
+      double work[3] = {0, 0, 0}, wait[3] = {0, 0, 0};
+      int cnt[3] = {0, 0, 0};
+      std::vector<int> sms(256, 0);
+      for (const auto& e : ht) {
+        const int ty = (int)(e.info >> 56), sm = (int)((e.info >> 40) & 0xFFFF);
+        t_min = std::min(t_min, e.t0), t_max = std::max(t_max, e.t2);
+        const unsigned long long t1 = std::max(e.t0, std::min(e.t1, e.t2));
+        work[ty] += (double)(e.t2 - t1), wait[ty] += (double)(t1 - e.t0), ++cnt[ty];
+        sms[sm & 255] = 1;
+        if (ty == 1) p1_end = std::max(p1_end, e.t2);
+        if (ty == 2) p2_beg = std::min(p2_beg, e.t0), p2_end = std::max(p2_end, e.t2);
+      }
+      int nsm = 0;
+      for (int s : sms) nsm += s;
+      const double span = (double)(t_max - t_min), us = 1e-3;
+      std::printf("trace %s: %u items (q %d p1 %d p2 %d) on %d SMs, span %.1f us | pass-1 end %.1f, pass 2 %.1f .. %.1f "
+                  "| SM-us work q %.0f p1 %.0f p2 %.0f, wait q %.0f p1 %.0f p2 %.0f, idle %.0f (%.1f %%)\n",
+                  tag, nt, cnt[0], cnt[1], cnt[2], nsm, span * us, (p1_end - t_min) * us, (p2_beg - t_min) * us,
+                  (p2_end - t_min) * us, work[0] * us, work[1] * us, work[2] * us, wait[0] * us, wait[1] * us,
+                  wait[2] * us, (nsm * span - work[0] - work[1] - work[2] - wait[0] - wait[1] - wait[2]) * us,
+                  100.0 * (1.0 - (work[0] + work[1] + work[2] + wait[0] + wait[1] + wait[2]) / (nsm * span)));
+    };
+#endif
+    void* ws0;
+    CK(cudaMalloc(&ws0, b0));
+    const float t0 = time([&] {
+      if (!apa::prefill(Q, K, V, O, p, eps, ws0, b0, 0, 0)) std::exit(10);
+    });
+    CK(cudaMemcpy(h0.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+#ifdef APA_TRACE
+    traced("win 0", [&] {
+      if (!apa::prefill(Q, K, V, O, p, eps, ws0, b0, 0, 0)) std::exit(12);
+    });
+#endif
+    for (const char* s = e; *s != '\0';) {
+      const int S = std::atoi(s);
+      const size_t b1 = apa::workspace_bytes(p, true, S);
+      void* ws1;
+      CK(cudaMalloc(&ws1, b1));
+      const apa::Workspace wq = apa::carve(p, ws1, true, S);
+      CK(cudaMemset(O, 0, nq * 2));
+      const float t1 = time([&] {
+        if (!apa::prefill(Q, K, V, O, p, eps, ws1, b1, 0, S)) std::exit(11);
+      });
+      CK(cudaMemcpy(h1.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+#ifdef APA_TRACE
+      const std::string tag = "win " + std::to_string(S);
+      traced(tag.c_str(), [&] {
+        if (!apa::prefill(Q, K, V, O, p, eps, ws1, b1, 0, S)) std::exit(13);
+      });
+#endif
+      int wovf = 0;
+      CK(cudaMemcpy(&wovf, wq.ovf, 4, cudaMemcpyDeviceToHost));
+      size_t wd = 0;
+      for (size_t i = 0; i < nq; ++i) wd += __half_as_ushort(h0[i]) != __half_as_ushort(h1[i]);
+      const double mib = 1.0 / (1 << 20), tb = 9216.0 * nkv;
+      const int ntkv = (kv + 63) / 64;
+      std::printf("window S %d eps %.0e: %d segments, %zu of %zu output elements differ, ovf %d | prefill %.3f ms "
+                  "(win 0: %.3f, %+.2f %%) | workspace %.1f MiB (win 0: %.1f), KV %.1f MiB (win 0: %.1f)\n",
+                  S, eps, wq.nseg, wd, nq, wovf, t1, t0, 100.0 * (t1 - t0) / t0, b1 * mib, b0 * mib,
+                  (wq.nseg > 1 ? 1.0 + apa::WIN_SLOTS * S : ntkv) * tb * mib, ntkv * tb * mib);
+      CK(cudaFree(ws1));
+      while (*s != '\0' && *s != ',') ++s;
+      if (*s == ',') ++s;
+    }
+    CK(cudaFree(ws0));
+  }
+  // APA_QSL=m (comma list): the n queries as prefill calls of m tokens each (keys up to each slice's last position,
+  // stats per call) vs one call, default window: time and workspace of the cost study for query slices.
+  if (const char* e = std::getenv("APA_QSL")) {
+    const float eps = epss.back();
+    const size_t b0 = apa::workspace_bytes(p);
+    void* ws0;
+    CK(cudaMalloc(&ws0, b0));
+    const float t0 = time([&] {
+      if (!apa::prefill(Q, K, V, O, p, eps, ws0, b0, 0)) std::exit(14);
+    });
+    for (const char* s = e; *s != '\0';) {
+      const int m = std::min(n, std::atoi(s));
+      apa::Problem pl = p;
+      pl.Sq = m;
+      const size_t b1 = apa::workspace_bytes(pl);
+      void* ws1;
+      CK(cudaMalloc(&ws1, b1));
+      const float t1 = time([&] {
+        for (int s0 = 0; s0 < n; s0 += m) {
+          apa::Problem ps = p;
+          ps.Sq = std::min(m, n - s0);
+          ps.q_offset = off + s0;
+          ps.Skv = off + s0 + ps.Sq;
+          const size_t qo = (size_t)s0 * nh * hd;
+          if (!apa::prefill(Q + qo, K, V, O + qo, ps, eps, ws1, b1, 0)) std::exit(15);
+        }
+      });
+      std::printf("qslice %d eps %.0e: %d calls, prefill %.3f ms (one call: %.3f, %+.2f %%) | workspace %.1f MiB "
+                  "(one call: %.1f)\n",
+                  m, eps, (n + m - 1) / m, t1, t0, 100.0 * (t1 - t0) / t0, b1 / 1048576.0, b0 / 1048576.0);
+      CK(cudaFree(ws1));
+      while (*s != '\0' && *s != ',') ++s;
+      if (*s == ',') ++s;
+    }
+    CK(cudaFree(ws0));
   }
   // APA_CHUNKS=1: chunked prefill over the dump (chunks of n queries, the dump's Q rows each time, keys
   // [0, (c+1) n)); full requantization per chunk vs prefill_incremental (KvState). Accuracy = last chunk.

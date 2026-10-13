@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- KV window: the FP4 KV copy holds the sink tile + 2 ring slots of 96 tiles per (b, kv head) instead of every tile
+  (`APA_WIN`, `APA_WIN_SLOTS`; `prefill` / `prefill_paged` / `workspace_bytes` take `win`, 0 = every tile). Pass 1
+  walks the keys in segments (sink, then the diagonal backwards, as before); row state (o, m, la, ol) crosses
+  segments in part / carry: outputs bitwise equal to every tile (bench/test.sh 36 ok). Workspace, 2048 queries,
+  122880 keys, Hkv 8: 167.5 -> 46.8 MiB (KV 135.0 -> 13.6 MiB, constant in the context); imp bound Sq 4096 Skv
+  108000: 183.0 -> 79.4 MiB. prep + attn vs main, synthetic dumps, 5 reps: -5.70 to +3.61 %, imp sparse call shape
+  -1.78 / -3.11 % (PERF_LOG.md, 2026-10-13).
+- Launch: one persistent grid (SM count); tickets in order: quant items of segment k + 1 inside pass 1 of segment k,
+  pass 2 last. Every wait is on an earlier ticket. No window: -0.14 to +1.81 % vs main.
+- Window overflow redo (sampled stats too narrow): exact stats and the launch again, gated on the device flag.
+- Bench: `APA_WIN=S,..` (window vs every tile: bitwise, time, workspace), `APA_QSL=m,..` (query slices), synthetic
+  dumps `syn:n,kv,nh,nkv,seed` (`APA_SAVE=file`), item trace `-DAPA_TRACE`. test.sh: window checks, `NOBUILD=1`.
 - Docs: imp prefill / PPL, APA 0.6.0 vs 0.6.1, 4 reps interleaved (relayed, kekzl/imp#2650): sparse -0.28 % (eps 0.01) /
   -0.15 % (eps 0.005), dense -0.16 % / -1.11 %; 0.6.0 eps 0.005 sparse 5304.72 ms (2-rep run: 5666.82 ms).
 

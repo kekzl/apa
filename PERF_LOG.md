@@ -3454,3 +3454,72 @@ r4 eps 0.005 tile_cache true rc 0 | in  6847.73 ms | paged cached call
 
 Mean (min..max) ms. Per pair off slower in 7 of 8 (+2.29 to +4.85 %); r3 eps 0.01 -1.24 % (both arms ~7200 ms).
 Bench per layer +3.9 to +5.0 % (entry above) -> +2.2 to +2.9 % of imp dense prefill. Sparse prefill runs uncached.
+
+## 2026-10-13 KV window: FP4 KV copy in 2 ring slots of 96 tiles instead of every tile (branch win-kv, base b964cb9)
+
+Real dumps (lc_*) gone with ~/github.com/kekzl/imp-ra2; synthetic dumps `syn:2048,{32768,24,8 | 65536,32,8 |
+122880,24,8},1` (bench generator, sink + diagonal mass). Bitwise, time, VRAM only; no accuracy claim.
+
+Workspace, 2048 queries (bench `APA_WIN=96`, KV = FP4 copy):
+
+| Dump | every tile | window 96 x 2 | KV every tile | KV window |
+|---|---|---|---|---|
+| syn_32768_24 | 67.6 MiB | 46.0 MiB | 36.0 MiB | 13.6 MiB |
+| syn_65536_32 | 114.8 MiB | 57.3 MiB | 72.0 MiB | 13.6 MiB |
+| syn_122880_24 | 167.5 MiB | 46.8 MiB | 135.0 MiB | 13.6 MiB |
+
+`workspace_bytes` (host): Sq 4096 Skv 108000 H 24 Hkv 8 (imp Llama-3.2-3B bound) 183.0 -> 79.4 MiB; Sq 4096 Skv
+131072 H 32: 230.5 -> 102.1 MiB; Sq 4096 Skv 262144 H 32: 377.0 -> 104.6 MiB.
+
+prep + attn ms, mean (min..max) of 3 reps interleaved; main = b964cb9, w0 = branch with `-DAPA_WIN=0`; sparse =
+`APA_SPARSE=24576` on syn_122880_24 (imp sparse prefill call shape):
+
+| Case | eps | main | w0 | window (default) | window vs main |
+|---|---|---|---|---|---|
+| syn_122880_24 | 0.005 | 5.842 (5.819..5.875) | 5.887 (5.886..5.888) | 5.912 (5.875..5.952) | +1.20 % |
+| syn_122880_24 | 0.01 | 5.372 (5.365..5.377) | 5.464 (5.447..5.489) | 5.095 (5.059..5.125) | -5.16 % |
+| syn_65536_32 | 0.005 | 5.022 (5.003..5.036) | 5.038 (5.002..5.066) | 5.157 (5.135..5.200) | +2.69 % |
+| syn_65536_32 | 0.01 | 4.088 (4.079..4.102) | 4.136 (4.108..4.158) | 4.032 (4.026..4.042) | -1.37 % |
+| sparse | 0.005 | 2.678 (2.678..2.679) | 2.695 (2.694..2.695) | 2.622 (2.622..2.623) | -2.09 % |
+| sparse | 0.01 | 1.860 (1.856..1.862) | 1.870 (1.868..1.874) | 1.808 (1.807..1.811) | -2.80 % |
+
+w0 vs main +0.32 to +1.71 % (persistent launch, no window: contexts <= 12352 keys, KvState path).
+
+Remeasure, 5 reps interleaved, dumps regenerated (same `syn:` args), same binaries layout (main = b964cb9 worktree
+build); bench/test.sh with `REF=main`: 36 ok, 0 FAIL (default = main bitwise on all 3 dumps):
+
+| Case | eps | main | w0 | window (default) | window vs main |
+|---|---|---|---|---|---|
+| syn_32768_24 | 0.005 | 2.921 (2.916..2.926) | 2.952 (2.940..2.978) | 2.795 (2.787..2.818) | -4.32 % |
+| syn_32768_24 | 0.01 | 2.005 (1.986..2.022) | 2.002 (1.992..2.021) | 1.991 (1.966..2.058) | -0.70 % |
+| syn_65536_32 | 0.005 | 4.998 (4.958..5.031) | 5.050 (4.999..5.230) | 5.178 (5.139..5.309) | +3.61 % |
+| syn_65536_32 | 0.01 | 4.130 (4.078..4.277) | 4.125 (4.107..4.150) | 4.074 (4.025..4.137) | -1.36 % |
+| syn_122880_24 | 0.005 | 5.848 (5.829..5.886) | 5.947 (5.916..5.967) | 5.919 (5.883..5.969) | +1.20 % |
+| syn_122880_24 | 0.01 | 5.390 (5.373..5.431) | 5.488 (5.456..5.535) | 5.083 (5.054..5.126) | -5.70 % |
+| sparse | 0.005 | 2.679 (2.676..2.683) | 2.702 (2.695..2.719) | 2.632 (2.622..2.639) | -1.78 % |
+| sparse | 0.01 | 1.867 (1.862..1.878) | 1.875 (1.872..1.884) | 1.809 (1.807..1.813) | -3.11 % |
+
+w0 vs main -0.14 to +1.81 %.
+
+Item trace (`-DAPA_TRACE`, one call, syn_122880_24 eps 0.005), SM-us:
+
+| Variant | span us | quant | pass 1 | pass 2 | idle |
+|---|---|---|---|---|---|
+| every tile (quant in prep) | 5477.5 | 0 | 594806 | 225412 | 8.2 % |
+| 3 x 64, quant 1 tile per pass | 6688.4 | 121555 | 694696 | 225782 | 7.3 % |
+| 3 x 64, quant 3 tiles per pass | 6171.6 | 91418 | 644453 | 222117 | 7.8 % |
+| 2 x 96, quant 3 tiles per pass | 6087.1 | 90543 | 633454 | 221989 | 7.7 % |
+
+Quant item: 512 groups per tile on 384 threads = 67 % in pass 2 of 2; 3 tiles = 4 full passes. Pass 1 vs every tile
+in the same traced call pair: +50215 SM-us (3 x 64, 30 segments), +9902 (2 x 96, 20 segments); every-tile pass 1
+594238 / 623552 between the two runs (single calls). Pass 2 starts after the last segment; idle unchanged.
+
+Rejected, measured:
+
+| Variant | VRAM | cost |
+|---|---|---|
+| part as 16-bit halves (high in O, low in a half buffer), bitwise | -12 MiB at 2048 queries | +1.5 to +19.5 % (sparse 0.005: 2.621 -> 3.133 ms, 2 reps) |
+| queries in slices of m tokens, one prefill call each | 46.8 -> 30.4 / 26.3 / 20.2 MiB (m 1024 / 768 / 384) | +13.46 / +57.37 / +206.62 % (eps 0.005) |
+
+bench/test.sh (synthetic dumps, REF=main): 36 ok (window = every tile at S 32/64/128 and 3 slots at 32/64/96, forced
+overflow redo in the window = exact stats, default = main bitwise).

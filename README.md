@@ -9,7 +9,8 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 | Pass 1 | all-FP4 flash attention (`mma.sync kind::mxf4nvf4`) over all 64-key tiles, Q as two E2M1 terms (term 2 = residual of term 1), P scales per 16 keys in UE4M3; a tile whose share of the running row sum exceeds `eps` is hot: no P·V here, bit in a per-warp mask |
 | Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its 12 warps |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
-| Launch | one fused kernel: pass-1 CTAs, then persistent pass-2 workers on ticket counters and per-q-block ready flags |
+| KV window | FP4 K/V of the sink tile + 2 ring slots of 96 tiles per KV head (13.6 MiB at Hkv 8, any context); pass 1 walks the keys in segments, its row state crosses them; quantized inside the launch one segment ahead; bitwise equal to every tile quantized ahead |
+| Launch | one persistent kernel (grid = SMs) on ticket counters: quant items, pass-1 segments per q block, then pass 2 on whole q blocks; ready flags per q block |
 
 Scope: head dim 128, causal (`q_offset` = position of Q row 0), GQA (`H % Hkv == 0`), FP16 Q/K/V. K/V flat, or a
 paged FP16 pool through a block table plus a flat tail (chunked prefill). Pass-1 tile order: sink tile first,
@@ -117,8 +118,8 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 
 | Call | Use |
 |---|---|
-| `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream)` | flat K/V; `ws` holds `workspace_bytes(p)` |
-| `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
+| `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream, win)` | flat K/V; `ws` holds `workspace_bytes(p, true, win)`; `win` tiles per KV-window segment (default `APA_WIN` 96, 0 = every tile quantized ahead) |
+| `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream, win)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
 | `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.985519, 0 pairs < 0.9 (full requantization per chunk: 0.986760, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
 | `supported(p, kv)` | shape gate; every entry point returns false when it declines |
 
@@ -135,6 +136,10 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | Short context | `APA_KV=8192` (first N keys) |
 | Paged path, bitwise vs flat | `APA_PAGED=16` (block size; `APA_NOSHUF=1`: blocks in order) |
 | Chunked prefill + tile cache | `APA_CHUNKS=1`; `=2` also compares every chunk with a full requantization (bitwise); `=3` also scores every chunk vs FP32 |
+| KV window vs every tile ahead: bitwise, time, workspace | `APA_WIN=32,64,96` (tiles per segment) |
+| Query slices: one prefill call per m queries (cost study) | `APA_QSL=1024,768` |
+| Synthetic dump (no file): sink + diagonal mass; `APA_SAVE=file` writes it as a dump | `./build/bench_apa syn:2048,122880,24,8,1` |
+| Item trace of the launch (SM time per item type, waits, idle), with `APA_WIN` | `NVFLAGS=-DAPA_TRACE sh bench/build.sh` |
 | Batch 2 (batch 1 = V negated), bitwise vs B = 1 | `APA_B2=1` |
 | imp sparse prefill call: past cut to B tokens of 16-key pages (sink, recent, top by q.k) | `APA_SPARSE=B` |
 | Raw O per eps to a file / pass-2 union per warp group | `APA_OUT=file` / `APA_UNION=1` |
