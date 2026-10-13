@@ -199,16 +199,18 @@ __device__ __forceinline__ void qk16(float (&s)[8][4], const uint32_t (&qa)[8][4
   }
 }
 
-// Scale, shift, mask (col > lim), new row max over the quad.
+// Scale, shift, mask (col > lim or col < lb), new row max over the quad.
 __device__ __forceinline__ void scale_mask16(float (&s)[8][4], float qmul, float sh_lo, float sh_hi, int col0,
-                                             int lim_lo, int lim_hi, float& mx_lo, float& mx_hi) {
+                                             int lim_lo, int lim_hi, int lb_lo, int lb_hi, float& mx_lo,
+                                             float& mx_hi) {
 #pragma unroll
   for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
       const bool hi = e >> 1;
+      const int c = col0 + nt * 8 + (e & 1);
       float x = fmaf(s[nt][e], qmul, -(hi ? sh_hi : sh_lo));
-      if (col0 + nt * 8 + (e & 1) > (hi ? lim_hi : lim_lo)) x = -INFINITY;
+      if (c > (hi ? lim_hi : lim_lo) || c < (hi ? lb_hi : lb_lo)) x = -INFINITY;
       s[nt][e] = x;
       if (hi) mx_hi = fmaxf(mx_hi, x); else mx_lo = fmaxf(mx_lo, x);
     }
@@ -334,7 +336,7 @@ __device__ __forceinline__ void p2s_refill(P2Stream& ps, uint8_t* smem, const RS
 
 // Pass 2 of q block qb with all NW warps (pass-1 warp w = warp w here). u: union steps of this CTA so far (ring
 // position, same in every thread), advanced by this q block's union length.
-template <int NW, bool CAUSAL, typename T, typename RS>
+template <int NW, bool CAUSAL, bool SW, typename T, typename RS>
 __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, T* __restrict__ O, const Dims& dm,
                                           float qmul, const Pass1Out& p1, int b, int hk, int nqb, int qb,
                                           P2Stream& ps, uint8_t* smem, uint32_t& u) {
@@ -349,6 +351,10 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
   const int r_lo = row0 + (lane >> 2), r_hi = r_lo + 8;
   const int lim_lo = CAUSAL ? min(dm.q_offset + min(r_lo, R - 1) / G, dm.Skv - 1) : dm.Skv - 1;
   const int lim_hi = CAUSAL ? min(dm.q_offset + min(r_hi, R - 1) / G, dm.Skv - 1) : dm.Skv - 1;
+  const int sw = SW ? dm.swin : 0;  // sliding window: first visible key per row (INT_MIN: none)
+  const int lb_lo = sw > 0 ? dm.q_offset + min(r_lo, R - 1) / G - sw + 1 : INT_MIN;
+  const int lb_hi = sw > 0 ? dm.q_offset + min(r_hi, R - 1) / G - sw + 1 : INT_MIN;
+  const int lb_wmin = sw > 0 ? dm.q_offset + min(row0, R - 1) / G - sw + 1 : INT_MIN;
   auto q_row = [&](int r) {
     const int rr = min(r, R - 1);
     return Q + (((size_t)b * dm.Sq + rr / G) * dm.H + hk * G + rr % G) * 128 + T0 * 2;
@@ -380,12 +386,12 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
     }
     mbar_wait(fb, ph);  // acquire in every lane (phase already complete)
     const int j0 = t * BKV;
-    if (valid && (!CAUSAL || j0 <= p_wmax) && ((whot[t >> 5] >> (t & 31)) & 1u)) {
+    if (valid && (!CAUSAL || j0 <= p_wmax) && j0 + BKV > lb_wmin && ((whot[t >> 5] >> (t & 31)) & 1u)) {
       mine_any = true;
       float sc[8][4];
       qk16(sc, qa, sbase + s * P2_SMEM, lm_i, lm_r);
       float mx_lo = w.m_lo, mx_hi = w.m_hi;
-      scale_mask16(sc, qmul, sh_lo, sh_hi, j0 + T0 * 2, lim_lo, lim_hi, mx_lo, mx_hi);
+      scale_mask16(sc, qmul, sh_lo, sh_hi, j0 + T0 * 2, lim_lo, lim_hi, lb_lo, lb_hi, mx_lo, mx_hi);
       softmax16(w, sc, mx_lo, mx_hi);
       pv16(w, sc, sbase + s * P2_SMEM + BKV * P2_ROWB, lm_i, lm_r);
     }
@@ -472,7 +478,7 @@ __device__ __forceinline__ void quant_item(const RS& rs, const Dims& dm, const f
 // quant items of segment 0); past the last pass-1 ticket it runs pass 2 on whole q blocks (pass2_cta). Every
 // wait (quant of k, segment k - 1 of the q block, slot reuse, pass 1 for pass 2) is on an earlier ticket, held by
 // a running CTA: no deadlock. Pass 2 fills the SMs of pass 1's last wave. gate: run only if *gate (redo).
-template <bool CAUSAL, typename T, typename RS>
+template <bool CAUSAL, bool SW, typename T, typename RS>
 __global__ void __launch_bounds__(384, 1)
     apa_kernel(const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs, const float* __restrict__ Qr,
                const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q,
@@ -537,7 +543,7 @@ __global__ void __launch_bounds__(384, 1)
     }
     sg.first = k == 0;
     sg.last = k == wn.nseg - 1;
-    pass1_cta<128, NW, 6, CAUSAL, T>(Qq, Qs, Qr, sg, hs, O, dm, p1, b, hk, qb, nqb, smem);
+    pass1_cta<128, NW, 6, CAUSAL, SW, T>(Qq, Qs, Qr, sg, hs, O, dm, p1, b, hk, qb, nqb, smem);
     // publish: every thread fences its writes (O, part, ml, carry, masks), then release adds
     __threadfence();
     __syncthreads();
@@ -573,7 +579,7 @@ __global__ void __launch_bounds__(384, 1)
     const uint64_t t0 = gtime();
 #endif
     const int jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
-    pass2_cta<NW, CAUSAL, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem, u);
+    pass2_cta<NW, CAUSAL, SW, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem, u);
 #ifdef APA_TRACE
     trace(t0, g_apa_tw[blockIdx.x & 1023], 2, 0, j);
 #endif

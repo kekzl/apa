@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Sliding window: `Problem::window` (keys per query, causal; 0 = full). Pass 1 / pass 2 skip tiles below the window
+  per CTA and warp, mask the lower edge; KV-window segments below query 0's window are not quantized or walked; a
+  window covering every key runs the causal kernel. Kernel template `SW`: the no-window kernels are SASS-identical to
+  3d71e0d (causal flat 9512, paged 10272 instructions, 0 differ). Synthetic dumps, eps 0.005, 3 reps: 122880 keys,
+  window 4096: 6.053 -> 0.804 ms (7.53x), window 1024: 14.88x; 32768 keys, window 1024: 7.63x; sampled min cos vs an
+  FP32 windowed reference >= 0.999884 up to window 4096, eps -1 0.999927. Window 30000 of 32768 keys: 0.93x (1 run) vs
+  causal. bench `APA_SWA`, test.sh: 60 ok (PERF_LOG.md, 2026-10-13).
 - KV window: the FP4 KV copy holds the sink tile + 2 ring slots of 96 tiles per (b, kv head) instead of every tile
   (`APA_WIN`, `APA_WIN_SLOTS`; `prefill` / `prefill_paged` / `workspace_bytes` take `win`, 0 = every tile). Pass 1
   walks the keys in segments (sink, then the diagonal backwards, as before); row state (o, m, la, ol) crosses

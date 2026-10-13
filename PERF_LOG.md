@@ -3523,3 +3523,36 @@ Rejected, measured:
 
 bench/test.sh (synthetic dumps, REF=main): 36 ok (window = every tile at S 32/64/128 and 3 slots at 32/64/96, forced
 overflow redo in the window = exact stats, default = main bitwise).
+
+## 2026-10-13 Sliding window: `Problem::window` (branch swa, base 3d71e0d)
+
+Synthetic dumps (2048 queries at the end of the context), bench `APA_SWA=512,1024,4096,8192,32768`, eps 0.005,
+prefill = prep + attn ms, mean (min..max) of 3 runs; causal = same process, `window` 0; min cos of 512 sampled pairs vs
+an FP32 windowed reference (ref_kernel, keys (pos - w, pos]); eps -1 (every tile exact): worst min 0.999927, 0 bad:
+
+| Dump | window | prefill | causal | speedup | pairs | min cos |
+|---|---|---|---|---|---|---|
+| syn_122880_24 | 512 | 0.342 (0.342..0.343) | 6.053 | 17.68x | 0.4 % | 0.999987 |
+| syn_122880_24 | 1024 | 0.407 (0.406..0.407) | 6.053 | 14.88x | 0.8 % | 0.999920 |
+| syn_122880_24 | 4096 | 0.804 (0.804..0.805) | 6.053 | 7.53x | 3.4 % | 0.999884 |
+| syn_122880_24 | 8192 | 1.317 (1.315..1.320) | 6.053 | 4.60x | 6.7 % | 0.999619 |
+| syn_122880_24 | 32768 | 3.182 (3.179..3.183) | 6.053 | 1.90x | 26.9 % | 0.991012 |
+| syn_32768_24 | 512 | 0.310 (0.309..0.311) | 2.848 | 9.19x | 1.6 % | 0.999989 |
+| syn_32768_24 | 1024 | 0.373 (0.372..0.375) | 2.848 | 7.63x | 3.2 % | 0.999956 |
+| syn_32768_24 | 4096 | 0.768 (0.766..0.770) | 2.848 | 3.71x | 12.9 % | 0.999895 |
+| syn_32768_24 | 8192 | 1.286 (1.285..1.287) | 2.848 | 2.21x | 25.8 % | 0.999624 |
+| syn_32768_24 | 32768 | 2.859 (2.854..2.862) | 2.848 | 1.00x | 100.0 % | 0.991425 |
+| syn_65536_32 | 512 | 0.384 (0.383..0.384) | 5.249 | 13.68x | 0.8 % | 0.999982 |
+| syn_65536_32 | 1024 | 0.461 (0.460..0.462) | 5.249 | 11.39x | 1.6 % | 0.999979 |
+| syn_65536_32 | 4096 | 1.010 (1.008..1.013) | 5.249 | 5.20x | 6.3 % | 0.999946 |
+| syn_65536_32 | 8192 | 1.716 (1.713..1.719) | 5.249 | 3.06x | 12.7 % | 0.999897 |
+| syn_65536_32 | 32768 | 4.183 (4.175..4.188) | 5.249 | 1.25x | 50.8 % | 0.990502 |
+
+Window 30000 of 32768 keys (1 run): 3.052 vs 2.843 ms, 0.93x; cause not profiled.
+
+No-window kernels: SASS vs 3d71e0d (cuobjdump, opcodes, param offsets stripped): causal flat 9512 / paged 10272
+instructions, 0 differ; non-causal: 1 FMNMX operand swap each. prep + attn, 3 reps: syn_32768_24 2.795 / 2.795 ms,
+syn_122880_24 5.898 / 5.895 ms. A first build with runtime window checks (no template) cost +2.66 to +4.77 %.
+
+bench/test.sh (NOBUILD=1, REF=3d71e0d build): 60 ok, 0 FAIL; sliding window exact = windowed ref (flat KV window,
+every tile `-DAPA_WIN=0`, `APA_SPARSE=8192` q_offset > 0), window >= kv bitwise = causal.

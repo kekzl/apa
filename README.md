@@ -10,11 +10,13 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 | Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its 12 warps |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
 | KV window | FP4 K/V of the sink tile + 2 ring slots of 96 tiles per KV head (13.6 MiB at Hkv 8, any context); pass 1 walks the keys in segments, its row state crosses them; quantized inside the launch one segment ahead; bitwise equal to every tile quantized ahead |
+| Sliding window | `Problem::window` w: query at pos sees keys (pos - w, pos]; CTAs and warps skip tiles below the window, the lower edge is masked in pass 1 and pass 2; KV-window segments below the first query's window are neither quantized nor walked; a window covering every key runs the plain causal kernel (bitwise equal) |
 | Launch | one persistent kernel (grid = SMs) on ticket counters: quant items, pass-1 segments per q block, then pass 2 on whole q blocks; ready flags per q block |
 
 Scope: head dim 128, causal (`q_offset` = position of Q row 0), GQA (`H % Hkv == 0`), FP16 Q/K/V. K/V flat, or a
-paged FP16 pool through a block table plus a flat tail (chunked prefill). Pass-1 tile order: sink tile first,
-then the diagonal backwards.
+paged FP16 pool through a block table plus a flat tail (chunked prefill). Causal sliding window
+(`window`, Mistral / Gemma style; no sink tile unless inside the window). Pass-1 tile order: sink tile first, then the
+diagonal backwards.
 
 ## Results
 
@@ -114,6 +116,19 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | APA eps 0.002 | 17.3556 | 10.7855 | 5915.15 |
 | APA eps 0.01 | 17.3385 | 10.7728 | 4863.56 |
 
+Sliding window (`APA_SWA`), synthetic dumps (2048 queries at the end of the context), eps 0.005, prep + attn ms, mean of
+3 reps; cos min of 512 sampled pairs vs an FP32 windowed reference (eps -1, every tile exact: min 0.999927); PERF_LOG.md,
+2026-10-13:
+
+| Dump | window | ms | causal ms | speedup | pairs | min cos |
+|---|---|---|---|---|---|---|
+| syn_32768_24 | 1024 | 0.373 | 2.848 | 7.63x | 3.2 % | 0.999956 |
+| syn_32768_24 | 4096 | 0.768 | 2.848 | 3.71x | 12.9 % | 0.999895 |
+| syn_65536_32 | 4096 | 1.010 | 5.249 | 5.20x | 6.3 % | 0.999946 |
+| syn_122880_24 | 1024 | 0.407 | 6.053 | 14.88x | 0.8 % | 0.999920 |
+| syn_122880_24 | 4096 | 0.804 | 6.053 | 7.53x | 3.4 % | 0.999884 |
+| syn_122880_24 | 32768 | 3.182 | 6.053 | 1.90x | 26.9 % | 0.991012 |
+
 ## API (`include/apa/apa.cuh`, namespace `apa`)
 
 | Call | Use |
@@ -121,7 +136,8 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream, win)` | flat K/V; `ws` holds `workspace_bytes(p, true, win)`; `win` tiles per KV-window segment (default `APA_WIN` 96, 0 = every tile quantized ahead) |
 | `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream, win)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
 | `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.985519, 0 pairs < 0.9 (full requantization per chunk: 0.986760, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
-| `supported(p, kv)` | shape gate; every entry point returns false when it declines |
+| `supported(p, kv)` | shape gate; every entry point returns false when it declines (also `window < 0`, or `window > 0` without `causal`) |
+| `Problem::window` | causal sliding window, keys per query (own key included); 0 = full causal; tested on flat K/V (KV window and every tile, q_offset > 0); paged / incremental share the kernel, untested |
 
 `eps`: tile share of the running row sum above which a tile is exact; use 0.005 (table above).
 
@@ -137,6 +153,7 @@ Perplexity, APA 0.2.0 (eps 0.002 / 0.01 rows: 0.1.0, which 0.2.0 repeats exactly
 | Paged path, bitwise vs flat | `APA_PAGED=16` (block size; `APA_NOSHUF=1`: blocks in order) |
 | Chunked prefill + tile cache | `APA_CHUNKS=1`; `=2` also compares every chunk with a full requantization (bitwise); `=3` also scores every chunk vs FP32 |
 | KV window vs every tile ahead: bitwise, time, workspace | `APA_WIN=32,64,96` (tiles per segment) |
+| Sliding window vs an FP32 windowed reference: sampled cos, time vs causal, pairs; window >= kv bitwise vs causal | `APA_SWA=1024,4096` (keys per query) |
 | Query slices: one prefill call per m queries (cost study) | `APA_QSL=1024,768` |
 | Synthetic dump (no file): sink + diagonal mass; `APA_SAVE=file` writes it as a dump | `./build/bench_apa syn:2048,122880,24,8,1` |
 | Item trace of the launch (SM time per item type, waits, idle), with `APA_WIN` | `NVFLAGS=-DAPA_TRACE sh bench/build.sh` |

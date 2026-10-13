@@ -97,13 +97,15 @@ __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[C
       mma_fp4(s[nt], qa2[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf2[ks], ksw[nt * KST + ks]);
 }
 
-// Causal diagonal / KV tail: col > lim -> -inf.
-__device__ __forceinline__ void mask_tile(float (&s)[8][4], int col0, int lim_lo, int lim_hi) {
+// Causal diagonal / KV tail: col > lim -> -inf; sliding window: col < lb -> -inf (lb INT_MIN: none).
+__device__ __forceinline__ void mask_tile(float (&s)[8][4], int col0, int lim_lo, int lim_hi, int lb_lo, int lb_hi) {
 #pragma unroll
   for (int nt = 0; nt < 8; ++nt)
 #pragma unroll
-    for (int e = 0; e < 4; ++e)
-      if (col0 + nt * 8 + (e & 1) > ((e >> 1) ? lim_hi : lim_lo)) s[nt][e] = -INFINITY;
+    for (int e = 0; e < 4; ++e) {
+      const int c = col0 + nt * 8 + (e & 1);
+      if (c > ((e >> 1) ? lim_hi : lim_lo) || c < ((e >> 1) ? lb_hi : lb_lo)) s[nt][e] = -INFINITY;
+    }
 }
 
 // Raw group maxima: gm[0]=lo h0, [1]=hi h0, [2]=lo h1, [3]=hi h1; pair-reduced = 16-col groups.
@@ -234,23 +236,30 @@ struct WarpQ {
   uint32_t k_lane[Cfg<D>::CPR / 4], v_lane;
   float c_lo, c_hi;  // log2 score = s * c (per row)
   int T0, T1, pos_lo, pos_hi, p_wmin;
+  int lb_lo, lb_hi, lb_wmax;  // sliding window: first visible key per row, warp max (INT_MIN: no window)
 };
 
 // One active tile of one warp: QK, mask, online max, P, hot test (tile share of the running row sum la
 // over all tiles; la only grows, so a cold verdict stays valid); cold tiles add P V. Returns hot.
-template <int D, bool CAUSAL>
+template <int D, bool CAUSAL, bool SW>
 __device__ __forceinline__ bool tile_step(Rows<Cfg<D>::DT>& w, const WarpQ<D>& q, uint32_t stage,
                                           const uint8_t* sgen, int j0, const Dims& dm, float eps) {
   float s[8][4];
   qk_tile<D>(s, q.qa, q.qsf, stage, sgen, q.k_lane, q.T1, q.qa2, q.qsf2);
-  if ((CAUSAL && j0 + BKV - 1 > q.p_wmin) || j0 + BKV > dm.Skv) {
+  if ((CAUSAL && j0 + BKV - 1 > q.p_wmin) || j0 + BKV > dm.Skv || (SW && j0 < q.lb_wmax)) {
     const int lim_lo = CAUSAL ? min(q.pos_lo, dm.Skv - 1) : dm.Skv - 1;
     const int lim_hi = CAUSAL ? min(q.pos_hi, dm.Skv - 1) : dm.Skv - 1;
-    mask_tile(s, j0 + q.T0 * 2, lim_lo, lim_hi);
+    if constexpr (SW) mask_tile(s, j0 + q.T0 * 2, lim_lo, lim_hi, q.lb_lo, q.lb_hi);
+    else mask_tile(s, j0 + q.T0 * 2, lim_lo, lim_hi, INT_MIN, INT_MIN);
   }
   float gm[4], c_lo, c_hi;
   group_max(s, gm);
   cand_max(w, fmaxf(gm[0], gm[2]) * q.c_lo, fmaxf(gm[1], gm[3]) * q.c_hi, c_lo, c_hi);
+  // no visible key yet (sliding window, no sink): finite frame, masked P = 0 instead of NaN
+  if constexpr (SW) {
+    c_lo = fmaxf(c_lo, -FLT_MAX);
+    c_hi = fmaxf(c_hi, -FLT_MAX);
+  }
   float bias[4];
   uint32_t kb[4], pa[4];
   p_scales(gm, c_lo, c_hi, q.c_lo, q.c_hi, bias, kb);
@@ -378,7 +387,7 @@ __device__ __forceinline__ void warp_q_init(WarpQ<D>& q, const uint8_t* Qq, cons
 
 // One CTA: BQ packed rows (q block qb) of one (b, kv head) over the key segment sg; K/V tiles shared by its G q
 // heads. A segment without tiles of this CTA (not the last) leaves the carried state as is.
-template <int D, int NW, int STAGES, bool CAUSAL, typename OutT>
+template <int D, int NW, int STAGES, bool CAUSAL, bool SW, typename OutT>
 __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs,
                                           const float* __restrict__ Qr, const Seg& sg,
                                           const HeadScale* __restrict__ hs, OutT* __restrict__ O, const Dims& dm,
@@ -395,8 +404,12 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
   const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;
   const int p_cmax = dm.q_offset + (min((qb + 1) * BQ, R) - 1) / G;  // last position in the CTA
   const int ntiles = CAUSAL ? min((p_cmax + BKV) / BKV, dm.ntkv) : dm.ntkv;
-  const int first = sg.first ? 1 : 0, top = min(sg.hi, ntiles), n = first + max(0, top - sg.lo);
-  if (n == 0 && !sg.last) return;
+  // sliding window: tiles below tmin hold no key of the CTA (the sink tile too, unless tmin == 0)
+  const int p_cmin = dm.q_offset + qb * BQ / G;
+  const int tmin = SW ? max(0, p_cmin - dm.swin + 1) / BKV : 0;
+  const int first = sg.first && tmin == 0 ? 1 : 0, top = min(sg.hi, ntiles);
+  const int n = first + max(0, top - max(sg.lo, tmin));
+  if (n == 0 && !sg.last && (!SW || !sg.first)) return;  // SW, first: writes the initial carry
   auto tile_of = [&](int i) { return APA_ORDER == 0 ? i : i < first ? 0 : top - 1 - (i - first); };
   auto src = [&](int i) {
     const int t = tile_of(i);
@@ -418,6 +431,11 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
   q.pos_lo = dm.q_offset + r_lo / G;
   q.pos_hi = dm.q_offset + (r_lo + 8) / G;
   q.p_wmin = dm.q_offset + min(row0, R - 1) / G;
+  const int sw = SW ? dm.swin : 0;
+  q.lb_lo = sw > 0 ? q.pos_lo - sw + 1 : INT_MIN;
+  q.lb_hi = sw > 0 ? q.pos_hi - sw + 1 : INT_MIN;
+  q.lb_wmax = sw > 0 ? p_wmax - sw + 1 : INT_MIN;
+  const int lb_wmin = sw > 0 ? q.p_wmin - sw + 1 : INT_MIN;  // tiles ending below it: no key of the warp
 
   Rows<DT> w;
 #pragma unroll
@@ -453,8 +471,8 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
     const int st = i % STAGES, t = tile_of(i);
     const uint32_t stage = sbase + st * TILE;
     mbar_wait(full0 + st * 8, (i / STAGES) & 1);
-    if (valid && (!CAUSAL || t * BKV <= p_wmax) &&  // warp-uniform
-        tile_step<D, CAUSAL>(w, q, stage, smem + st * TILE, t * BKV, dm, out.eps)) {
+    if (valid && (!CAUSAL || t * BKV <= p_wmax) && (!SW || (t + 1) * BKV > lb_wmin) &&  // warp-uniform
+        tile_step<D, CAUSAL, SW>(w, q, stage, smem + st * TILE, t * BKV, dm, out.eps)) {
       if (lane == 0) atomicOr(whot + (t >> 5), 1u << (t & 31));
       any_hot = true;
     }

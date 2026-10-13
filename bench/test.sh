@@ -3,7 +3,8 @@
 # REF: optional bench binary in build/ of an earlier commit with the same kernel; outputs must match bitwise.
 # Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, KV window vs
 # every tile ahead, all-pairs accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats (window
-# redo on dumps over 12352 keys). Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed with APA_SAVE=file.
+# redo on dumps over 12352 keys); sliding window (APA_SWA, flat and every tile, q_offset > 0) vs a windowed FP32 ref,
+# window >= kv vs causal. Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed with APA_SAVE=file.
 # NOBUILD=1: reuse build/test_* (build them first without a GPU). Exit 1 on any failed check.
 set -u
 cd "$(dirname "$0")/.."
@@ -30,7 +31,8 @@ has() { grep -qE "$2" "$OUT/$1.log"; }
 none() { ! grep -qE "$2" "$OUT/$1.log"; }
 
 for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" "pov:-DAPA_PREP_HEADROOM=0.015625f" \
-         "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" "ns3:-DAPA_WIN_SLOTS=3"; do
+         "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" "ns3:-DAPA_WIN_SLOTS=3" \
+         "w0:-DAPA_WIN=0"; do
   [ -n "${NOBUILD:-}" ] || check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
 done
 for f in "$DUMPS"/*.bin; do
@@ -52,6 +54,15 @@ for f in "$DUMPS"/*.bin; do
   run test_ns3 "$d" "${d}_ns3" -e APA_EPS=0.005 -e APA_WIN=32,64,96
   check "$d window, 3 slots run" has "${d}_ns3" "^window S 96"
   check "$d window, 3 slots = every tile" none "${d}_ns3" "^window S .* [1-9][0-9]* of [0-9]+ output elements differ"
+  for sv in def w0; do
+    run "test_$sv" "$d" "${d}_swa_$sv" -e APA_EPS=0.005 -e APA_SWA=1024,4096,1048576
+    check "$d sliding window ($sv) run" has "${d}_swa_$sv" "^swa 4096 eps 5e-03"
+    check "$d sliding window ($sv) exact = windowed ref" none "${d}_swa_$sv" "^swa [0-9]+ eps -1e\+00: .* bad [1-9]"
+    check "$d sliding window ($sv) >= kv = causal" has "${d}_swa_$sv" "vs causal: 0 of"
+  done
+  run test_def "$d" "${d}_swa_sp" -e APA_EPS=0.005 -e APA_SPARSE=8192 -e APA_SWA=1024,4096
+  check "$d sliding window, q_offset > 0 exact" none "${d}_swa_sp" "^swa [0-9]+ eps -1e\+00: .* bad [1-9]"
+  check "$d sliding window, q_offset > 0 run" has "${d}_swa_sp" "^swa 4096 eps 5e-03"
   if [ -n "${REF:-}" ]; then
     run "$REF" "$d" "${d}_ref" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ref
     run test_def "$d" "${d}_cur" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_cur

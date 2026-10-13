@@ -6,6 +6,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cfloat>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 
@@ -216,6 +218,7 @@ __device__ __forceinline__ void wait_geq(const uint32_t* p, uint32_t v) {
 struct Dims {
   int B, Sq, Skv, H, Hkv, G, R, ntkv, q_offset;
   int kvcap;  // KV blob stride in tiles per (b, kv head): ntkv, or a persistent KvState capacity
+  int swin;   // sliding window: keys per query (pos - swin, pos]; 0 = full causal
 };
 
 __device__ __forceinline__ float to_f(__half x) { return __half2float(x); }

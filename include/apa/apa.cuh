@@ -23,6 +23,7 @@ struct Problem {
   int q_offset;  // causal: Q row i sits at position q_offset + i (chunked prefill: Skv = q_offset + Sq)
   bool causal;
   float scale;   // softmax scale (usually 1/sqrt(D))
+  int window = 0;  // causal sliding window: query at pos sees keys (pos - window, pos]; 0 = every earlier key
 };
 
 enum class KvKind { Flat, PagedF16, PagedNvfp4 };
@@ -39,7 +40,9 @@ struct KvSource {
 inline Dims make_dims(const Problem& p) {
   const int G = p.H / p.Hkv;
   const int ntkv = (p.Skv + BKV - 1) / BKV;
-  return Dims{p.B, p.Sq, p.Skv, p.H, p.Hkv, G, p.Sq * G, ntkv, p.q_offset, ntkv};
+  // a window covering every query's keys (window >= q_offset + Sq) runs the plain causal kernel
+  const int swin = p.causal && p.window > 0 && p.window < p.q_offset + p.Sq ? p.window : 0;
+  return Dims{p.B, p.Sq, p.Skv, p.H, p.Hkv, G, p.Sq * G, ntkv, p.q_offset, ntkv, swin};
 }
 
 // KV window: tiles per pass-1 segment; the FP4 KV copy holds the sink tile + WIN_SLOTS segments per (b, kv head)
@@ -92,9 +95,11 @@ inline Workspace carve(const Problem& p, void* base, bool own_kv = true, int win
   w.W = (dm.ntkv + 31) / 32;
   w.nqb = (dm.R + NW * 16 - 1) / (NW * 16);
   w.rp = w.nqb * NW * 16;
-  const bool wnd = own_kv && APA_ORDER == 1 && win > 0 && dm.ntkv - 1 > WIN_SLOTS * win;
+  // sliding window: segments below tile tlo (first key of query 0) hold no visible key: not quantized, not walked
+  const int tlo = dm.swin > 0 ? std::max(1, (p.q_offset - dm.swin + 1) / BKV) : 1, need = dm.ntkv - tlo;
+  const bool wnd = own_kv && APA_ORDER == 1 && win > 0 && (dm.ntkv - 1 > WIN_SLOTS * win || (tlo > 1 && need > 0));
   w.S = wnd ? win : 0;
-  w.nseg = wnd ? (dm.ntkv - 1 + win - 1) / win : 1;
+  w.nseg = wnd ? std::max(2, (need + win - 1) / win) : 1;
   const size_t rows_p = bhk * w.rp;
   w.amax = reinterpret_cast<unsigned*>(take((bhk * 3 + 1) * 4));
   w.ovf = reinterpret_cast<int*>(w.amax + bhk * 3);
@@ -128,6 +133,7 @@ inline size_t workspace_bytes(const Problem& p, bool own_kv = true, int win = WI
   if (p.D != 64 && p.D != 128 && p.D != 256) return false;
   if (p.Hkv <= 0 || p.H % p.Hkv != 0 || p.Sq <= 0 || p.Skv <= 0 || p.B <= 0) return false;
   if (p.causal && p.q_offset + p.Sq > p.Skv) return false;  // every query needs its own key
+  if (p.window < 0 || (p.window > 0 && (!p.causal || APA_ORDER != 1))) return false;
   if (kv.kind != KvKind::Flat && (kv.block_table == nullptr || kv.block_size <= 0)) return false;
   if (kv.kind == KvKind::PagedNvfp4 && (kv.k_scales == nullptr || kv.v_scales == nullptr)) return false;
   return true;
@@ -319,15 +325,16 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
     wn.qpb = (w.S + WIN_QT - 1) / WIN_QT;
   }
   // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
-  static int nsm = 0, attr_dev = -1;
+  static int nsm = 0, attr_dev[2] = {-1, -1};
   int dev = 0;
   if ((e = cudaGetDevice(&dev)) != cudaSuccess) return e;
   if (nsm == 0 && (e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev)) != cudaSuccess) return e;
   const int n1 = (with_pass1 && eps >= 0.f) ? (int)bhk * w.nqb : 0;
-  auto k = apa_kernel<CAUSAL, T, RS>;
-  if (attr_dev != dev) {
+  const int sw = CAUSAL && dm.swin > 0;  // sliding window kernel (causal only)
+  auto k = sw ? apa_kernel<CAUSAL, CAUSAL, T, RS> : apa_kernel<CAUSAL, false, T, RS>;
+  if (attr_dev[sw] != dev) {
     if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess) return e;
-    attr_dev = dev;
+    attr_dev[sw] = dev;
   }
   k<<<nsm, NW * 32, smem, st>>>(w.Qq, w.Qs, w.Qr, w.KV, w.hs, Q, rs, O, dm, p.scale * LOG2E, out, n1, w.nqb, w.ticket,
                                 wn, gate);

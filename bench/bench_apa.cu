@@ -25,7 +25,7 @@
 
 using T = __half;
 
-__global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, int H, int Hkv, int off,
+__global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, int H, int Hkv, int off, int win,
                            float scale, const int2* rows, float* scratch, float* out) {
   constexpr int D = 128;
   __shared__ float q[D];
@@ -35,9 +35,9 @@ __global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, 
   float* sc = scratch + (size_t)blockIdx.x * Skv;
   if (tid < D) q[tid] = __half2float(Q[((size_t)rw.x * H + rw.y) * D + tid]);
   __syncthreads();
-  const int n = min(off + rw.x + 1, Skv);
+  const int n = min(off + rw.x + 1, Skv), j0 = win > 0 ? max(0, off + rw.x - win + 1) : 0;
   float mx = -INFINITY;
-  for (int j = tid; j < n; j += 256) {
+  for (int j = j0 + tid; j < n; j += 256) {
     float a = 0;
     for (int d = 0; d < D; ++d) a += q[d] * __half2float(K[((size_t)j * Hkv + hk) * D + d]);
     sc[j] = a * scale;
@@ -52,7 +52,7 @@ __global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, 
   mx = red[0];
   __syncthreads();
   float l = 0;
-  for (int j = tid; j < n; j += 256) l += (sc[j] = expf(sc[j] - mx));
+  for (int j = j0 + tid; j < n; j += 256) l += (sc[j] = expf(sc[j] - mx));
   red[tid] = l;
   __syncthreads();
   for (int o = 128; o; o >>= 1) {
@@ -62,7 +62,7 @@ __global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, 
   l = red[0];
   if (tid < D) {
     float a = 0;
-    for (int j = 0; j < n; ++j) a += sc[j] * __half2float(V[((size_t)j * Hkv + hk) * D + tid]);
+    for (int j = j0; j < n; ++j) a += sc[j] * __half2float(V[((size_t)j * Hkv + hk) * D + tid]);
     out[(size_t)blockIdx.x * D + tid] = a / l;
   }
 }
@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
   CK(cudaMalloc(&scr, (size_t)ns * kv * 4));
   CK(cudaMalloc(&ref, (size_t)ns * hd * 4));
   CK(cudaMemcpy(drows, rows.data(), ns * sizeof(int2), cudaMemcpyHostToDevice));
-  ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, scale, drows, scr, ref);
+  ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, drows, scr, ref);
   CK(cudaDeviceSynchronize());
   std::vector<float> hr((size_t)ns * hd);
   CK(cudaMemcpy(hr.data(), ref, hr.size() * 4, cudaMemcpyDeviceToHost));
@@ -454,7 +454,7 @@ int main(int argc, char** argv) {
             const int c = (int)std::min<size_t>(nb, np - i0);
             for (int i = 0; i < c; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
             CK(cudaMemcpy(dpr, pr.data(), c * sizeof(int2), cudaMemcpyHostToDevice));
-            ref_kernel<<<c, 256>>>(Q, K, V, n, kv, nh, nkv, off, scale, dpr, dscr, dout);
+            ref_kernel<<<c, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, dpr, dscr, dout);
             CK(cudaMemcpy(rall.data() + i0 * hd, dout, (size_t)c * hd * 4, cudaMemcpyDeviceToHost));
           }
           CK(cudaFree(dpr));
@@ -522,7 +522,7 @@ int main(int argc, char** argv) {
       CK(cudaMalloc(&dscr, (size_t)20 * kv * 4));
       CK(cudaMalloc(&dout, 20 * hd * 4));
       CK(cudaMemcpy(dtop, top.data(), 20 * sizeof(int2), cudaMemcpyHostToDevice));
-      ref_kernel<<<20, 256>>>(Q, K, V, n, kv, nh, nkv, off, scale, dtop, dscr, dout);
+      ref_kernel<<<20, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, dtop, dscr, dout);
       std::vector<float> sc20((size_t)20 * kv);
       CK(cudaMemcpy(sc20.data(), dscr, sc20.size() * 4, cudaMemcpyDeviceToHost));
 #ifdef APA_DBG
@@ -904,6 +904,72 @@ int main(int argc, char** argv) {
     }
     CK(cudaFree(ws0));
   }
+  // APA_SWA=w (comma list): causal sliding window of w keys per query. Sampled rows vs an FP32 windowed reference at
+  // eps -1 (exact) and the last eps; bad = rows with cos < 0.99 or NaN; prefill time vs full causal; w >= kv: bitwise
+  // vs full causal.
+  if (const char* e = std::getenv("APA_SWA")) {
+    const float eps = epss.back();
+    const size_t b0 = apa::workspace_bytes(p);
+    void* ws0;
+    CK(cudaMalloc(&ws0, b0));
+    CK(cudaMemset(O, 0, nq * 2));
+    if (!apa::prefill(Q, K, V, O, p, eps, ws0, b0, 0)) std::exit(15);
+    std::vector<T> h0(nq), ho(nq);
+    CK(cudaMemcpy(h0.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+    const float t0 = time([&] {
+      if (!apa::prefill(Q, K, V, O, p, eps, ws0, b0, 0)) std::exit(15);
+    });
+    float* dref;
+    CK(cudaMalloc(&dref, (size_t)ns * hd * 4));
+    std::vector<float> hw((size_t)ns * hd);
+    for (const char* s = e; *s != '\0';) {
+      const int sw = std::atoi(s);
+      apa::Problem pw = p;
+      pw.window = sw;
+      const size_t bw = apa::workspace_bytes(pw);
+      void* ws1;
+      CK(cudaMalloc(&ws1, bw));
+      ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, sw, scale, drows, scr, dref);
+      CK(cudaMemcpy(hw.data(), dref, hw.size() * 4, cudaMemcpyDeviceToHost));
+      double sp = 0;
+      for (int i = 0; i < n; ++i) sp += std::min(std::min(off + i + 1, kv), sw);
+      for (const float ee : {-1.f, eps}) {
+        CK(cudaMemset(O, 0, nq * 2));
+        if (!apa::prefill(Q, K, V, O, pw, ee, ws1, bw, 0)) std::exit(16);
+        CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+        double dot = 0, na = 0, nb = 0, cm = 1;
+        int bad = 0;
+        for (int i = 0; i < ns; ++i) {
+          double d = 0, x = 0, y = 0;
+          for (int c = 0; c < hd; ++c) {
+            const double a = hw[(size_t)i * hd + c];
+            const double b = __half2float(ho[((size_t)rows[i].x * nh + rows[i].y) * hd + c]);
+            d += a * b, x += a * a, y += b * b;
+          }
+          const double c = d / std::sqrt(x * y);
+          cm = std::min(cm, c), bad += !(c >= 0.99), dot += d, na += x, nb += y;
+        }
+        std::string eq;
+        if (sw >= kv && ee == eps) {
+          size_t df = 0;
+          for (size_t i = 0; i < nq; ++i) df += __half_as_ushort(h0[i]) != __half_as_ushort(ho[i]);
+          eq = " | vs causal: " + std::to_string(df) + " of " + std::to_string(nq) + " differ";
+        }
+        const float t1 = time([&] {
+          if (!apa::prefill(Q, K, V, O, pw, ee, ws1, bw, 0)) std::exit(16);
+        });
+        std::printf("swa %d eps %.0e: cos %.6f min %.6f bad %d of %d | prefill %.3f ms (causal eps %.0e: %.3f, %.2fx) "
+                    "| pairs %.1f %%%s\n",
+                    sw, ee, dot / std::sqrt(na * nb), cm, bad, ns, t1, eps, t0, t0 / t1, 100.0 * sp / pairs,
+                    eq.c_str());
+      }
+      CK(cudaFree(ws1));
+      while (*s != '\0' && *s != ',') ++s;
+      if (*s == ',') ++s;
+    }
+    CK(cudaFree(dref));
+    CK(cudaFree(ws0));
+  }
   // APA_QSL=m (comma list): the n queries as prefill calls of m tokens each (keys up to each slice's last position,
   // stats per call) vs one call, default window: time and workspace of the cost study for query slices.
   if (const char* e = std::getenv("APA_QSL")) {
@@ -992,7 +1058,7 @@ int main(int argc, char** argv) {
           const int m = (int)std::min<size_t>(1024, np - i0);
           for (int i = 0; i < m; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
           CK(cudaMemcpy(dpr, pr.data(), m * sizeof(int2), cudaMemcpyHostToDevice));
-          ref_kernel<<<m, 256>>>(Q, K, V, n, (c + 1) * n, nh, nkv, c * n, scale, dpr, dscr, dout);
+          ref_kernel<<<m, 256>>>(Q, K, V, n, (c + 1) * n, nh, nkv, c * n, 0, scale, dpr, dscr, dout);
           CK(cudaMemcpy(rc.data() + i0 * hd, dout, (size_t)m * hd * 4, cudaMemcpyDeviceToHost));
         }
       };
