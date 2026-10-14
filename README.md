@@ -7,13 +7,13 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 |---|---|
 | Prep | K mean and head scales (sampled stats); Q (two terms), K, V to E2M1 with one UE4M3 scale per 16 values: the code in nearest(amax / 6) + {0, -1, 1, -2, 3 .. 6} with the least squared error (f16x2 ranking) |
 | Pass 1 | all-FP4 flash attention (`mma.sync kind::mxf4nvf4`) over all 64-key tiles, Q as two E2M1 terms (term 2 = residual of term 1), P scales per 16 keys in UE4M3; a tile whose share of the running row sum exceeds `eps` is hot: no P·V here, bit in a per-warp mask |
-| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its 12 warps |
+| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its warps (12 at hd 128; 8 at hd 256, 32-key half tiles) |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
 | KV window | FP4 K/V of the sink tile + 2 ring slots of 96 tiles per KV head (13.6 MiB at Hkv 8, any context); pass 1 walks the keys in segments, its row state crosses them; quantized inside the launch one segment ahead; bitwise equal to every tile quantized ahead |
 | Sliding window | `Problem::window` w: query at pos sees keys (pos - w, pos]; CTAs and warps skip tiles below the window, the lower edge is masked in pass 1 and pass 2; KV-window segments below the first query's window are neither quantized nor walked; a window covering every key runs the plain causal kernel (bitwise equal) |
 | Launch | one persistent kernel (grid = SMs) on ticket counters: quant items, pass-1 segments per q block, then pass 2 on whole q blocks; ready flags per q block |
 
-Scope: head dim 128, causal (`q_offset` = position of Q row 0), GQA (`H % Hkv == 0`), FP16 Q/K/V. K/V flat, or a
+Scope: head dim 128 or 256 (hd 256: 8 warps per CTA, 4 pass-1 stages; synthetic dumps only), causal (`q_offset` = position of Q row 0), GQA (`H % Hkv == 0`), FP16 Q/K/V. K/V flat, or a
 paged FP16 pool through a block table plus a flat tail (chunked prefill). Causal sliding window
 (`window`, Mistral / Gemma style; no sink tile unless inside the window). Pass-1 tile order: sink tile first, then the
 diagonal backwards.
@@ -129,6 +129,14 @@ Sliding window (`APA_SWA`), synthetic dumps (2048 queries at the end of the cont
 | syn_122880_24 | 4096 | 0.804 | 6.053 | 7.53x | 3.4 % | 0.999884 |
 | syn_122880_24 | 32768 | 3.182 | 6.053 | 1.90x | 26.9 % | 0.991012 |
 
+Head dim 256, synthetic dumps `syn:2048,kv,16,nkv,seed,256` (2048 queries at the end of the context, 16 q heads),
+attn ms (prep 0.059 to 0.159 ms), eps 0.005 mean of 3 reps; all pairs vs FP32; PERF_LOG.md, 2026-10-15:
+
+| Dump | Hkv | eps -1 (every tile exact) | eps 0.01 | eps 0.005 | hot | min cos | pairs < 0.99 |
+|---|---|---|---|---|---|---|---|
+| syn256_32768 | 4 | 4.604 | 2.710 | 3.901 | 48.0 % | 0.990454 | 0 of 32768 |
+| syn256_122880 | 2 | 17.485 | 6.333 | 7.592 | 20.7 % | 0.983569 | 7920 of 32768 |
+
 ## API (`include/apa/apa.cuh`, namespace `apa`)
 
 | Call | Use |
@@ -136,7 +144,7 @@ Sliding window (`APA_SWA`), synthetic dumps (2048 queries at the end of the cont
 | `prefill(Q, K, V, O, p, eps, ws, ws_bytes, stream, win)` | flat K/V; `ws` holds `workspace_bytes(p, true, win)`; `win` tiles per KV-window segment (default `APA_WIN` 96, 0 = every tile quantized ahead) |
 | `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream, win)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
 | `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.985519, 0 pairs < 0.9 (full requantization per chunk: 0.986760, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
-| `supported(p, kv)` | shape gate; every entry point returns false when it declines (also `window < 0`, or `window > 0` without `causal`) |
+| `supported(p, kv)` | shape gate; every entry point returns false when it declines (head dim other than 128 / 256, `window < 0`, or `window > 0` without `causal`) |
 | `Problem::window` | causal sliding window, keys per query (own key included); 0 = full causal; tested on flat K/V (KV window and every tile, q_offset > 0); paged / incremental share the kernel, untested |
 
 `eps`: tile share of the running row sum above which a tile is exact; use 0.005 (table above).

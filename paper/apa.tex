@@ -14,7 +14,7 @@
 \title{APA: Adaptive-Precision Attention\\
 \large Exact FP16 for the Few Tiles That Matter, FP4 for the Rest}
 \author{Raphael Friedmann\\\small\url{https://github.com/kekzl/apa}}
-\date{October 2026, APA 0.6.1}
+\date{October 2026, APA 0.7.0}
 
 \begin{document}
 \maketitle
@@ -101,10 +101,10 @@ scale per head so that $|x|_{\max}$ maps to $6\cdot448=2688$.
 
 \section{Method}
 
-APA computes causal attention for head dim $d=128$ with GQA ($H$ query heads, $H_{kv}$ KV heads,
+APA computes causal attention for head dim $d=128$ or $d=256$ with GQA ($H$ query heads, $H_{kv}$ KV heads,
 $G=H/H_{kv}$). Keys are split into tiles of $B_{kv}=64$. Query rows of the $G$ heads sharing a KV head are
 \emph{packed}: packed row $r$ is position $\lfloor r/G\rfloor$ of query head $h_{kv}G+(r\bmod G)$, so one CTA
-of 12 warps covers $12\cdot16=192$ packed rows and loads each KV tile once for all $G$ heads.
+of 12 warps covers $12\cdot16=192$ packed rows (8 warps, 128 rows at $d=256$) and loads each KV tile once for all $G$ heads.
 
 \subsection{Preparation}
 
@@ -260,14 +260,35 @@ it to an FP32 accumulator; the extra 32 registers per thread cause spills in the
 
 \subsection{Fused launch}
 
-Both passes run in one launch of $n_1+n_{\text{SM}}$ CTAs of 384 threads, where $n_1$ is the number of
-(batch, KV head, query block) pass-1 items. Each CTA takes a ticket from an atomic counter. Tickets below
-$n_1$ run pass 1 (causal: heaviest query blocks first); the rest become persistent pass-2 workers that
-pull query blocks from a second counter. A pass-2 worker spins on its
-query block's ready flag, which the pass-1 CTA sets with a release store after a fence; the worker reads it
-with acquire semantics. Tickets are handed to CTAs in the order they start running, so every pass-1 item a
-worker waits on is already resident: the scheme cannot deadlock. Pass-2 work fills the SMs left idle by
-pass 1's last wave.
+Since 0.7.0 both passes run in one persistent launch with one CTA per SM. A CTA takes tickets in order from
+an atomic counter: per key segment $k$ (see KV window below) the quantization items of segment $k+1$, then
+pass 1 of segment $k$ on every query block; past the last pass-1 ticket it pulls whole query blocks for
+pass 2 from a second counter. Every wait (quantized segment, previous segment of the same query block, ring
+slot reuse, pass 1 before pass 2) is on an earlier ticket held by a running CTA, so the scheme cannot
+deadlock. Ready flags are set with a release store after a fence and read with acquire semantics. Pass-2
+work fills the SMs left idle by pass 1's last wave.
+
+\subsection{KV window}
+
+The FP4 copy of K and V holds the sink tile plus 2 ring slots of 96 tiles per (batch, KV head) instead of
+every tile: 13.6\,MiB at $H_{kv}=8$ for any context (135.0\,MiB at 122880 keys before). Pass 1 walks the keys
+in segments (sink, then the diagonal backwards, as before); the row state ($o$, $m$, $\ell$) crosses segments
+in global memory, so tile order and every value equal one pass over all tiles and the outputs are bitwise
+equal. Quantization of segment $k+1$ runs inside the launch while pass 1 works on segment $k$.
+
+\subsection{Sliding window}
+
+\code{Problem::window} $w$ restricts the query at position $p$ to keys $(p-w, p]$. CTAs and warps skip tiles
+below their window, the lower edge is masked in pass 1 and pass 2, and KV-window segments below the first
+query's window are neither quantized nor walked. On synthetic inputs with 122880 keys, $w=4096$ takes
+0.804\,ms against 6.053\,ms causal (7.53$\times$). The window is a template parameter: the kernels without it are
+SASS-identical to the previous release.
+
+\subsection{Head dim 256}
+
+At $d=256$ a CTA has 8 warps and 4 pass-1 stages. $QK^\top$ loads K fragments per \code{ldmatrix.x4} group
+(32 instead of 64 registers), PV reads V scales per pair of n8 tiles, and pass 2 streams 32-key half tiles
+(2 steps per KV tile) so 3 stages still fit in 96\,KiB. Adding $d=256$ leaves the $d=128$ kernels SASS-identical.
 
 \subsection{Determinism}
 
@@ -702,7 +723,7 @@ APA 0.2.0 / 0.1.0.}
 \item \textbf{Exact mode.} The f16 output accumulation of pass 2 limits the all-exact configuration;
   the FP32 alternative costs 14.5 to 24.9\,\% at $\eps=0.005$ through register spills.
 \item \textbf{Granularity.} The hot verdict is per (warp, tile): one row of 16 makes the tile exact for all.
-\item \textbf{Scope.} Head dim 128, causal, FP16 inputs, sm\_120a only.
+\item \textbf{Scope.} Head dim 128 or 256 (256 tested on synthetic inputs only), causal, FP16 inputs, sm\_120a only.
 \item \textbf{Evidence.} Six dumps from one model; accuracy over all pairs, times from single runs
   (drift up to 10\,\%); imp numbers come from the imp repository. A direct
   comparison with FP4 attention kernels such as SageAttention3 \cite{zhang2025sageattention3} on the same

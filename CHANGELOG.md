@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-15)
 
+- Head dim 256 (`Problem::D` 256) on every entry point (flat, paged, incremental, KV window, sliding window): 8 warps
+  per CTA, 4 pass-1 stages; QK^T K fragments per x4 group (32 instead of 64 registers), V scales per n8 pair; pass 2
+  in 32-key half tiles (2 steps per KV tile, 3 stages = 96 KiB as at hd 128); quant items 2 tiles per pass on 256
+  threads. hd 128 kernels SASS-identical to 6df61cd (6 kernels, 0 differ). Synthetic dumps, 2048 queries, 16 q heads,
+  eps 0.005, 3 reps: 32768 keys Hkv 4 attn 3.901 ms (eps -1: 4.604), 122880 keys Hkv 2 7.592 ms (eps -1: 17.485);
+  all pairs vs FP32: min cos 0.990454 / 0.983569. bench `syn:n,kv,nh,nkv,seed,hd`; test.sh: hd 256 dumps 38 ok, hd 128
+  40 ok with REF = 6df61cd bitwise (REF only on hd 128 dumps) (PERF_LOG.md, 2026-10-15).
 - Sliding window: `Problem::window` (keys per query, causal; 0 = full). Pass 1 / pass 2 skip tiles below the window
   per CTA and warp, mask the lower edge; KV-window segments below query 0's window are not quantized or walked; a
   window covering every key runs the causal kernel. Kernel template `SW`: the no-window kernels are SASS-identical to
