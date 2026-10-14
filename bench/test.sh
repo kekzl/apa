@@ -4,7 +4,7 @@
 # Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, KV window vs
 # every tile ahead, all-pairs accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats (window
 # redo on dumps over 12352 keys); sliding window (APA_SWA, flat and every tile, q_offset > 0) vs a windowed FP32 ref,
-# window >= kv vs causal. Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed with APA_SAVE=file.
+# window >= kv vs causal. Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed[,hd] with APA_SAVE=file.
 # NOBUILD=1: reuse build/test_* (build them first without a GPU). Exit 1 on any failed check.
 set -u
 cd "$(dirname "$0")/.."
@@ -63,7 +63,7 @@ for f in "$DUMPS"/*.bin; do
   run test_def "$d" "${d}_swa_sp" -e APA_EPS=0.005 -e APA_SPARSE=8192 -e APA_SWA=1024,4096
   check "$d sliding window, q_offset > 0 exact" none "${d}_swa_sp" "^swa [0-9]+ eps -1e\+00: .* bad [1-9]"
   check "$d sliding window, q_offset > 0 run" has "${d}_swa_sp" "^swa 4096 eps 5e-03"
-  if [ -n "${REF:-}" ]; then
+  if [ -n "${REF:-}" ] && [ "$(od -An -tu4 -j16 -N4 "$f" | tr -d " ")" = 128 ]; then  # REF builds: hd 128 only
     run "$REF" "$d" "${d}_ref" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_ref
     run test_def "$d" "${d}_cur" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_cur
     check "$d default = $REF" cmp -s "$OUT/${d}_ref_0.005000" "$OUT/${d}_cur_0.005000"

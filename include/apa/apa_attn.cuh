@@ -75,26 +75,45 @@ __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[C
   using C = Cfg<D>;
   constexpr int KST = C::KSTEPS;
   const uint8_t* ksb = sgen + C::K_BYTES + C::V_BYTES + T1 * (D / 2);
-  uint32_t kf[8][2 * KST], ksw[8 * KST];
+  if constexpr (D != 128) {  // hd 256: K fragments per x4 group (2 k-steps), 32 instead of 64 registers
 #pragma unroll
-  for (int i = 0; i < 8 * KST / 4; ++i)
-    *reinterpret_cast<uint4*>(ksw + 4 * i) = *reinterpret_cast<const uint4*>(ksb + 16 * i);
+    for (int nt = 0; nt < 8; ++nt) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
 #pragma unroll
-  for (int nt = 0; nt < 8; ++nt) {
-    s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+    for (int gq = 0; gq < C::CPR / 4; ++gq) {
+      uint32_t kf[8][4];
 #pragma unroll
-    for (int gq = 0; gq < C::CPR / 4; ++gq) ldsm_x4(kf[nt] + 4 * gq, stage + k_lane[gq] + nt * 8 * C::RB);
+      for (int nt = 0; nt < 8; ++nt) ldsm_x4(kf[nt], stage + k_lane[gq] + nt * 8 * C::RB);
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt) {
+        const uint2 sw = *reinterpret_cast<const uint2*>(ksb + (nt * KST + 2 * gq) * 4);
+        mma_fp4(s[nt], qa[2 * gq], kf[nt][0], kf[nt][1], qsf[2 * gq], sw.x);
+        mma_fp4(s[nt], qa[2 * gq + 1], kf[nt][2], kf[nt][3], qsf[2 * gq + 1], sw.y);
+        mma_fp4(s[nt], qa2[2 * gq], kf[nt][0], kf[nt][1], qsf2[2 * gq], sw.x);
+        mma_fp4(s[nt], qa2[2 * gq + 1], kf[nt][2], kf[nt][3], qsf2[2 * gq + 1], sw.y);
+      }
+    }
+  } else {
+    uint32_t kf[8][2 * KST], ksw[8 * KST];
+#pragma unroll
+    for (int i = 0; i < 8 * KST / 4; ++i)
+      *reinterpret_cast<uint4*>(ksw + 4 * i) = *reinterpret_cast<const uint4*>(ksb + 16 * i);
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt) {
+      s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+#pragma unroll
+      for (int gq = 0; gq < C::CPR / 4; ++gq) ldsm_x4(kf[nt] + 4 * gq, stage + k_lane[gq] + nt * 8 * C::RB);
+    }
+#pragma unroll
+    for (int ks = 0; ks < KST; ++ks)
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt)
+        mma_fp4(s[nt], qa[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf[ks], ksw[nt * KST + ks]);
+#pragma unroll
+    for (int ks = 0; ks < KST; ++ks)
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt)
+        mma_fp4(s[nt], qa2[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf2[ks], ksw[nt * KST + ks]);
   }
-#pragma unroll
-  for (int ks = 0; ks < KST; ++ks)
-#pragma unroll
-    for (int nt = 0; nt < 8; ++nt)
-      mma_fp4(s[nt], qa[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf[ks], ksw[nt * KST + ks]);
-#pragma unroll
-  for (int ks = 0; ks < KST; ++ks)
-#pragma unroll
-    for (int nt = 0; nt < 8; ++nt)
-      mma_fp4(s[nt], qa2[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf2[ks], ksw[nt * KST + ks]);
 }
 
 // Causal diagonal / KV tail: col > lim -> -inf; sliding window: col < lb -> -inf (lb INT_MIN: none).
@@ -214,17 +233,29 @@ template <int D>
 __device__ __forceinline__ void pv_tile(float (&o)[Cfg<D>::DT][4], const uint32_t (&pa)[4], uint32_t psf,
                                         uint32_t stage, const uint8_t* sgen, uint32_t v_lane, int T1) {
   using C = Cfg<D>;
-  uint32_t vs[C::DT];
+  if constexpr (D != 128) {  // hd 256: V scales per n8 pair (2 words) instead of 32 registers
+    const uint8_t* vsb = sgen + C::K_BYTES + C::V_BYTES + C::KS_BYTES + T1 * (D / 2);
 #pragma unroll
-  for (int i = 0; i < C::DT / 4; ++i)
-    *reinterpret_cast<uint4*>(vs + 4 * i) =
-        *reinterpret_cast<const uint4*>(sgen + C::K_BYTES + C::V_BYTES + C::KS_BYTES + T1 * (D / 2) + i * 16);
+    for (int dp = 0; dp < C::DT / 2; ++dp) {
+      uint32_t vb[4];
+      ldsm_x4(vb, stage + v_lane + dp * 512);
+      const uint2 sw = *reinterpret_cast<const uint2*>(vsb + dp * 8);
+      mma_fp4(o[dp * 2], pa, vb[0], vb[1], psf, sw.x);
+      mma_fp4(o[dp * 2 + 1], pa, vb[2], vb[3], psf, sw.y);
+    }
+  } else {
+    uint32_t vs[C::DT];
 #pragma unroll
-  for (int dp = 0; dp < C::DT / 2; ++dp) {
-    uint32_t vb[4];
-    ldsm_x4(vb, stage + v_lane + dp * 512);
-    mma_fp4(o[dp * 2], pa, vb[0], vb[1], psf, vs[dp * 2]);
-    mma_fp4(o[dp * 2 + 1], pa, vb[2], vb[3], psf, vs[dp * 2 + 1]);
+    for (int i = 0; i < C::DT / 4; ++i)
+      *reinterpret_cast<uint4*>(vs + 4 * i) =
+          *reinterpret_cast<const uint4*>(sgen + C::K_BYTES + C::V_BYTES + C::KS_BYTES + T1 * (D / 2) + i * 16);
+#pragma unroll
+    for (int dp = 0; dp < C::DT / 2; ++dp) {
+      uint32_t vb[4];
+      ldsm_x4(vb, stage + v_lane + dp * 512);
+      mma_fp4(o[dp * 2], pa, vb[0], vb[1], psf, vs[dp * 2]);
+      mma_fp4(o[dp * 2 + 1], pa, vb[2], vb[3], psf, vs[dp * 2 + 1]);
+    }
   }
 }
 
@@ -392,7 +423,7 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
                                           const float* __restrict__ Qr, const Seg& sg,
                                           const HeadScale* __restrict__ hs, OutT* __restrict__ O, const Dims& dm,
                                           const Pass1Out& out, int b, int hk, int qb, int nqb, uint8_t* smem) {
-  static_assert(D == 128, "APA pass 1: hd 128 (K fragments preloaded, x4 ldmatrix)");
+  static_assert(D == 128 || D == 256, "APA pass 1: hd 128 or 256 (x4 ldmatrix)");
   using C = Cfg<D>;
   constexpr int BQ = NW * 16, TILE = C::TILE, DT = C::DT;
   __shared__ __align__(8) uint64_t full[STAGES], empty[STAGES];

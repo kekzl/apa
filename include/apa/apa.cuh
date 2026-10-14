@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
 // APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
 // attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
-// log-sum-exp. Attention: hd 128, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
+// log-sum-exp. Attention: hd 128 or 256, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
 // [B][Sq][H][D] FP16; K/V flat [B][Skv][Hkv][D] or a paged FP16 pool + flat tail. false = declined.
 #pragma once
 #include <cuda_runtime.h>
@@ -91,7 +91,7 @@ inline Workspace carve(const Problem& p, void* base, bool own_kv = true, int win
     return reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(base) + o);  // base may be null (size query)
   };
   Workspace w{};
-  constexpr int NW = 12;  // APA v1: hd 128 launch (Launch<128>)
+  const int NW = p.D == 256 ? Launch<256>::NW : Launch<128>::NW;
   w.W = (dm.ntkv + 31) / 32;
   w.nqb = (dm.R + NW * 16 - 1) / (NW * 16);
   w.rp = w.nqb * NW * 16;
@@ -138,26 +138,6 @@ inline size_t workspace_bytes(const Problem& p, bool own_kv = true, int win = WI
   if (kv.kind == KvKind::PagedNvfp4 && (kv.k_scales == nullptr || kv.v_scales == nullptr)) return false;
   return true;
 }
-
-// Launch config per head dim: warps per CTA, pipeline stages (1 CTA per SM).
-template <int D>
-struct Launch;
-template <>
-struct Launch<64> {
-#ifndef APA_NW64
-#define APA_NW64 16
-#define APA_ST64 6
-#endif
-  static constexpr int NW = APA_NW64, ST = APA_ST64;
-};
-template <>
-struct Launch<128> {
-  static constexpr int NW = 12, ST = 6;
-};
-template <>
-struct Launch<256> {
-  static constexpr int NW = 8, ST = 4;
-};
 
 // Prep (stats + KV blobs + Q packing) only; attn() consumes the workspace. Stats read every stride-th 1024-key chunk
 // (>= APA_PREP_SAMPLE chunks; 0: all chunks, exact head scales). Head scales x4, rounded up to powers of two (as the
@@ -282,15 +262,15 @@ __global__ void zero_if_kernel(W* p, size_t n, const int* gate) {
   for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) p[i] = W(0);
 }
 
-// APA attention on a prepared workspace (hd 128, flat K/V): pass 1 (all-FP4, hot tiles diverted), then
+// APA attention on a prepared workspace (hd 128 or 256): pass 1 (all-FP4, hot tiles diverted), then
 // pass 2 (exact FP16 on the hot tiles, merge). eps: tile share of the running row sum above which a tile is
 // hot; eps <= 0 sends every tile to pass 2 (exact baseline from the same code). One fused launch (apa_kernel).
 // with_pass1 = false: pass 2 alone on the masks/partials of a previous attn() (reads pass-1 output only).
-template <bool CAUSAL, typename T, typename RS>
-inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p, const Workspace& w, float eps,
-                               bool with_pass1, cudaStream_t st, const int* gate = nullptr) {
-  constexpr int NW = Launch<128>::NW;
-  constexpr int smem = Launch<128>::ST * Cfg<128>::TILE > 3 * P2_SMEM ? Launch<128>::ST * Cfg<128>::TILE : 3 * P2_SMEM;
+template <int D, bool CAUSAL, typename T, typename RS>
+inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, const Workspace& w, float eps,
+                             bool with_pass1, cudaStream_t st, const int* gate = nullptr) {
+  constexpr int NW = Launch<D>::NW;
+  constexpr int smem = std::max(std::max(Launch<D>::ST * Cfg<D>::TILE, P2S_STG * P2Cfg<D>::SMEM), QuantCfg<D>::SMEM);
   Dims dm = make_dims(p);
   if (w.kvcap > 0) dm.kvcap = w.kvcap;
   const size_t bhk = (size_t)p.B * p.Hkv, masks = bhk * w.nqb * (NW * w.W + 1) * 4;  // warp_hot + ready
@@ -331,7 +311,7 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
   if (nsm == 0 && (e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev)) != cudaSuccess) return e;
   const int n1 = (with_pass1 && eps >= 0.f) ? (int)bhk * w.nqb : 0;
   const int sw = CAUSAL && dm.swin > 0;  // sliding window kernel (causal only)
-  auto k = sw ? apa_kernel<CAUSAL, CAUSAL, T, RS> : apa_kernel<CAUSAL, false, T, RS>;
+  auto k = sw ? apa_kernel<D, CAUSAL, CAUSAL, T, RS> : apa_kernel<D, CAUSAL, false, T, RS>;
   if (attr_dev[sw] != dev) {
     if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess) return e;
     attr_dev[sw] = dev;
@@ -340,32 +320,43 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
                                 wn, gate);
   if ((e = cudaPeekAtLastError()) != cudaSuccess || !chk || gate != nullptr) return e;
   // window: a 16-block past the sampled scales (ovf) redoes exact stats and this launch, gated on the device flag
-  if ((e = redo_stats<128>(rs, p, w, st)) != cudaSuccess) return e;
-  return launch_d128<CAUSAL>(Q, rs, O, p, w, eps, true, st, w.ovf);
+  if ((e = redo_stats<D>(rs, p, w, st)) != cudaSuccess) return e;
+  return launch_d<D, CAUSAL>(Q, rs, O, p, w, eps, true, st, w.ovf);
+}
+
+// Head dim dispatch (hd 128 or 256), causal or not.
+template <typename T, typename RS>
+inline cudaError_t launch(const T* Q, const RS& rs, T* O, const Problem& p, const Workspace& w, float eps,
+                          bool with_pass1, cudaStream_t st) {
+  if (p.D == 256)
+    return p.causal ? launch_d<256, true>(Q, rs, O, p, w, eps, with_pass1, st)
+                    : launch_d<256, false>(Q, rs, O, p, w, eps, with_pass1, st);
+  if (p.D == 128)
+    return p.causal ? launch_d<128, true>(Q, rs, O, p, w, eps, with_pass1, st)
+                    : launch_d<128, false>(Q, rs, O, p, w, eps, with_pass1, st);
+  return cudaErrorInvalidValue;
 }
 
 template <typename T>
 inline cudaError_t pass2(const T* Q, const T* K, const T* V, T* O, const Problem& p, const Workspace& w, float eps,
                          cudaStream_t st) {
-  return p.causal ? launch_d128<true>(Q, FlatKV<T>{K, V}, O, p, w, eps, false, st)
-                  : launch_d128<false>(Q, FlatKV<T>{K, V}, O, p, w, eps, false, st);
+  return launch(Q, FlatKV<T>{K, V}, O, p, w, eps, false, st);
 }
 
 template <typename T>
 inline cudaError_t attn(const T* Q, const T* K, const T* V, T* O, const Problem& p, const Workspace& w, float eps,
                         cudaStream_t st) {
-  return p.causal ? launch_d128<true>(Q, FlatKV<T>{K, V}, O, p, w, eps, true, st)
-                  : launch_d128<false>(Q, FlatKV<T>{K, V}, O, p, w, eps, true, st);
+  return launch(Q, FlatKV<T>{K, V}, O, p, w, eps, true, st);
 }
 
-// Full prefill (flat K/V, hd 128). ws must hold workspace_bytes(p, true, win). false = declined or launch error.
+// Full prefill (flat K/V, hd 128 or 256). ws must hold workspace_bytes(p, true, win). false = declined or launch error.
 template <typename T>
 [[nodiscard]] inline bool prefill(const T* Q, const T* K, const T* V, T* O, const Problem& p, float eps, void* ws,
                                   size_t ws_bytes, cudaStream_t st, int win = WIN) {
   KvSource kv{};
   kv.k = K;
   kv.v = V;
-  if (p.D != 128 || !supported(p, kv) || ws_bytes < workspace_bytes(p, true, win)) return false;
+  if ((p.D != 128 && p.D != 256) || !supported(p, kv) || ws_bytes < workspace_bytes(p, true, win)) return false;
   const Workspace w = carve(p, ws, true, win);
   if (prep(Q, kv, p, w, st) != cudaSuccess) return false;
   return attn(Q, K, V, O, p, w, eps, st) == cudaSuccess;
@@ -382,7 +373,7 @@ inline PagedF16KV paged_reader(const __half* k_pool, const __half* v_pool, const
   return rd;
 }
 
-// Prefill straight from a paged FP16 cache (B = 1, hd 128): keys [0, tail) through block_table (block_size
+// Prefill straight from a paged FP16 cache (B = 1, hd 128 or 256): keys [0, tail) through block_table (block_size
 // slots of [Hkv][D]), keys [tail, Skv) from flat k_tail / v_tail [Skv - tail][Hkv][D] (imp's current chunk).
 // No gathered K/V copy. false = declined or launch error.
 template <typename T>
@@ -397,15 +388,13 @@ template <typename T>
   kv.block_table = block_table;
   kv.block_size = block_size;
   if (tail == 0) kv.kind = KvKind::Flat;  // empty pool (first chunk): block_table is never read
-  if (p.D != 128 || p.B != 1 || tail < 0 || tail > p.Skv || !supported(p, kv) ||
+  if ((p.D != 128 && p.D != 256) || p.B != 1 || tail < 0 || tail > p.Skv || !supported(p, kv) ||
       ws_bytes < workspace_bytes(p, true, win))
     return false;
   const PagedF16KV rd = paged_reader(k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail);
   const Workspace w = carve(p, ws, true, win);
   if (prep_r(Q, rd, p, w, st) != cudaSuccess) return false;
-  const cudaError_t e = p.causal ? launch_d128<true>(Q, rd, O, p, w, eps, true, st)
-                                 : launch_d128<false>(Q, rd, O, p, w, eps, true, st);
-  return e == cudaSuccess;
+  return launch(Q, rd, O, p, w, eps, true, st) == cudaSuccess;
 }
 
 // Persistent K/V tiles of one sequence and layer for chunked prefill: a chunk quantizes only its new tiles.
@@ -496,23 +485,23 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
   return cudaSuccess;
 }
 
-// Prefill of the next chunk (hd 128) with tiles cached in st across calls; ws holds workspace_bytes(p, false).
+// Prefill of the next chunk (hd 128 or 256) with tiles cached in st across calls; ws holds workspace_bytes(p, false).
 template <typename T, typename Reader>
 [[nodiscard]] inline bool prefill_incremental(const T* Q, const Reader& rd, T* O, const Problem& p, float eps,
                                               KvState& st, void* ws, size_t ws_bytes, cudaStream_t s) {
-  if (p.D != 128 || make_dims(p).ntkv > st.cap || ws_bytes < workspace_bytes(p, false)) return false;
+  if ((p.D != 128 && p.D != 256) || make_dims(p).ntkv > st.cap || ws_bytes < workspace_bytes(p, false)) return false;
   Workspace w = carve(p, ws, false);
   w.KV = st.KV;
   w.hs = st.hs;
   w.ksum = st.kmean;
   w.kvcap = st.cap;
-  if (prep_incremental<128>(Q, rd, p, w, st, s) != cudaSuccess) {
+  const cudaError_t e =
+      p.D == 256 ? prep_incremental<256>(Q, rd, p, w, st, s) : prep_incremental<128>(Q, rd, p, w, st, s);
+  if (e != cudaSuccess) {
     st.len = 0;  // unknown state: the next call restarts
     return false;
   }
-  const cudaError_t e =
-      p.causal ? launch_d128<true>(Q, rd, O, p, w, eps, true, s) : launch_d128<false>(Q, rd, O, p, w, eps, true, s);
-  return e == cudaSuccess;
+  return launch(Q, rd, O, p, w, eps, true, s) == cudaSuccess;
 }
 
 }  // namespace apa

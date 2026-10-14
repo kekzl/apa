@@ -25,10 +25,10 @@
 
 using T = __half;
 
-__global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, int H, int Hkv, int off, int win,
+__global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, int H, int Hkv, int off, int win, int D,
                            float scale, const int2* rows, float* scratch, float* out) {
-  constexpr int D = 128;
-  __shared__ float q[D];
+  // D <= 256 (one thread per channel)
+  __shared__ float q[256];
   __shared__ float red[256];
   const int2 rw = rows[blockIdx.x];  // (s, h)
   const int tid = threadIdx.x, hk = rw.y / (H / Hkv);
@@ -68,9 +68,8 @@ __global__ void ref_kernel(const T* Q, const T* K, const T* V, int Sq, int Skv, 
 }
 
 // APA_SPARSE: S[r][b] = max over heads and the 16 keys of block b of q.k (sample row r), block b < nblk.
-__global__ void block_score_kernel(const T* Q, const T* K, const int* rows, int nr, int nblk, int H, int Hkv,
+__global__ void block_score_kernel(const T* Q, const T* K, const int* rows, int nr, int nblk, int H, int Hkv, int D,
                                    float* S) {
-  constexpr int D = 128;
   const int b = blockIdx.x, G = H / Hkv;
   for (int p = threadIdx.x; p < nr * H; p += blockDim.x) {
     const int r = p / H, h = p % H;
@@ -94,12 +93,12 @@ int main(int argc, char** argv) {
   int hdr[6];
   std::vector<T> hq, hk, hv;
   if (std::strncmp(argv[1], "syn:", 4) == 0) {
-    // syn:n,kv,nh,nkv[,seed]: synthetic Q/K/V (no dump): N(0,1) plus K channel offsets, a sink key along a per-head
+    // syn:n,kv,nh,nkv[,seed[,hd]]: synthetic Q/K/V (no dump): N(0,1) plus K channel offsets, a sink key along a per-head
     // direction that every query shares, chunk keys near their own query (diagonal mass). Not for accuracy claims.
-    int s[5] = {2048, 32768, 24, 8, 1};
-    std::sscanf(argv[1] + 4, "%d,%d,%d,%d,%d", s, s + 1, s + 2, s + 3, s + 4);
-    hdr[0] = s[0], hdr[1] = s[1], hdr[2] = s[2], hdr[3] = s[3], hdr[4] = 128, hdr[5] = s[1] - s[0];
-    const int G = s[2] / s[3], D = 128;
+    int s[6] = {2048, 32768, 24, 8, 1, 128};
+    std::sscanf(argv[1] + 4, "%d,%d,%d,%d,%d,%d", s, s + 1, s + 2, s + 3, s + 4, s + 5);
+    hdr[0] = s[0], hdr[1] = s[1], hdr[2] = s[2], hdr[3] = s[3], hdr[4] = s[5], hdr[5] = s[1] - s[0];
+    const int G = s[2] / s[3], D = s[5];
     std::mt19937 g(s[4]);
     std::normal_distribution<float> nd(0.f, 1.f);
     std::vector<float> u((size_t)s[3] * D), mo((size_t)s[3] * D), q((size_t)s[0] * s[2] * D);
@@ -141,7 +140,7 @@ int main(int argc, char** argv) {
   }
   const int n = hdr[0], nh = hdr[2], nkv = hdr[3], hd = hdr[4];
   int kv = hdr[1], off = hdr[5];
-  if (hd != 128) return 1;
+  if (hd != 128 && hd != 256) return 1;
   const size_t nq = (size_t)n * nh * hd, nk = (size_t)kv * nkv * hd;
   if (const char* e = std::getenv("APA_KV")) {  // keep the first N keys, Q rows at N - n .. N - 1 (fixed-cost study)
     kv = std::max(n, std::min(kv, std::atoi(e)));
@@ -169,7 +168,7 @@ int main(int argc, char** argv) {
     CK(cudaMemcpy(drows, rows.data(), nr * 4, cudaMemcpyHostToDevice));
     std::vector<int> init((size_t)nr * nblk, (int)(0xFF800000u ^ 0x7FFFFFFFu));  // key of -inf
     CK(cudaMemcpy(dS, init.data(), init.size() * 4, cudaMemcpyHostToDevice));
-    block_score_kernel<<<nblk, 256>>>(Q, K, drows, nr, nblk, nh, nkv, dS);
+    block_score_kernel<<<nblk, 256>>>(Q, K, drows, nr, nblk, nh, nkv, hd, dS);
     CK(cudaMemcpy(init.data(), dS, init.size() * 4, cudaMemcpyDeviceToHost));
     std::vector<float> agg(nblk, INFINITY);
     for (int r = 0; r < nr; ++r) {
@@ -208,7 +207,7 @@ int main(int argc, char** argv) {
     CK(cudaFree(drows));
     CK(cudaFree(dS));
   }
-  const float scale = 1.f / std::sqrt(128.f);
+  const float scale = 1.f / std::sqrt((float)hd);
 
   // reference rows
   const int ns = 512;
@@ -221,7 +220,7 @@ int main(int argc, char** argv) {
   CK(cudaMalloc(&scr, (size_t)ns * kv * 4));
   CK(cudaMalloc(&ref, (size_t)ns * hd * 4));
   CK(cudaMemcpy(drows, rows.data(), ns * sizeof(int2), cudaMemcpyHostToDevice));
-  ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, drows, scr, ref);
+  ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, hd, scale, drows, scr, ref);
   CK(cudaDeviceSynchronize());
   std::vector<float> hr((size_t)ns * hd);
   CK(cudaMemcpy(hr.data(), ref, hr.size() * 4, cudaMemcpyDeviceToHost));
@@ -286,7 +285,7 @@ int main(int argc, char** argv) {
   std::printf("dump n %d kv %d off %d nh %d nkv %d\n", n, kv, off, nh, nkv);
 
   // ---- APA
-  apa::Problem p{1, n, kv, nh, nkv, 128, off, true, scale};
+  apa::Problem p{1, n, kv, nh, nkv, hd, off, true, scale};
   apa::KvSource akv{};
   akv.k = K;
   akv.v = V;
@@ -454,7 +453,7 @@ int main(int argc, char** argv) {
             const int c = (int)std::min<size_t>(nb, np - i0);
             for (int i = 0; i < c; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
             CK(cudaMemcpy(dpr, pr.data(), c * sizeof(int2), cudaMemcpyHostToDevice));
-            ref_kernel<<<c, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, dpr, dscr, dout);
+            ref_kernel<<<c, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, hd, scale, dpr, dscr, dout);
             CK(cudaMemcpy(rall.data() + i0 * hd, dout, (size_t)c * hd * 4, cudaMemcpyDeviceToHost));
           }
           CK(cudaFree(dpr));
@@ -504,7 +503,7 @@ int main(int argc, char** argv) {
                   rs[np - 1]);
       std::printf("  hist cos: <0 %zu [0,.5) %zu [.5,.9) %zu [.9,.99) %zu [.99,.999) %zu [.999,.9999) %zu >=.9999 %zu\n",
                   hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6]);
-      // per-channel amax spread (max / median over 128 channels) of K per kv head and Q per q head
+      // per-channel amax spread (max / median over hd channels) of K per kv head and Q per q head
       auto spread = [&](const std::vector<T>& src, size_t rowsN, int heads, int hsel) {
         std::vector<float> am(hd, 0.f);
         for (size_t r2 = 0; r2 < rowsN; ++r2)
@@ -522,7 +521,7 @@ int main(int argc, char** argv) {
       CK(cudaMalloc(&dscr, (size_t)20 * kv * 4));
       CK(cudaMalloc(&dout, 20 * hd * 4));
       CK(cudaMemcpy(dtop, top.data(), 20 * sizeof(int2), cudaMemcpyHostToDevice));
-      ref_kernel<<<20, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, scale, dtop, dscr, dout);
+      ref_kernel<<<20, 256>>>(Q, K, V, n, kv, nh, nkv, off, 0, hd, scale, dtop, dscr, dout);
       std::vector<float> sc20((size_t)20 * kv);
       CK(cudaMemcpy(sc20.data(), dscr, sc20.size() * 4, cudaMemcpyDeviceToHost));
 #ifdef APA_DBG
@@ -929,7 +928,7 @@ int main(int argc, char** argv) {
       const size_t bw = apa::workspace_bytes(pw);
       void* ws1;
       CK(cudaMalloc(&ws1, bw));
-      ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, sw, scale, drows, scr, dref);
+      ref_kernel<<<ns, 256>>>(Q, K, V, n, kv, nh, nkv, off, sw, hd, scale, drows, scr, dref);
       CK(cudaMemcpy(hw.data(), dref, hw.size() * 4, cudaMemcpyDeviceToHost));
       double sp = 0;
       for (int i = 0; i < n; ++i) sp += std::min(std::min(off + i + 1, kv), sw);
@@ -1025,8 +1024,8 @@ int main(int argc, char** argv) {
     const double cf = accuracy(cmin);
     full_summary("full requant");
     void* sb;
-    CK(cudaMalloc(&sb, apa::kv_state_bytes(1, nkv, 128, kv)));
-    apa::KvState st = apa::kv_state_carve(sb, 1, nkv, 128, kv);
+    CK(cudaMalloc(&sb, apa::kv_state_bytes(1, nkv, hd, kv)));
+    apa::KvState st = apa::kv_state_carve(sb, 1, nkv, hd, kv);
     const apa::FlatKV<T> rd{K, V};
     const float ti = time([&] {
       st.len = st.stats_len = 0;
@@ -1058,7 +1057,7 @@ int main(int argc, char** argv) {
           const int m = (int)std::min<size_t>(1024, np - i0);
           for (int i = 0; i < m; ++i) pr[i] = make_int2((int)((i0 + i) / nh), (int)((i0 + i) % nh));
           CK(cudaMemcpy(dpr, pr.data(), m * sizeof(int2), cudaMemcpyHostToDevice));
-          ref_kernel<<<m, 256>>>(Q, K, V, n, (c + 1) * n, nh, nkv, c * n, 0, scale, dpr, dscr, dout);
+          ref_kernel<<<m, 256>>>(Q, K, V, n, (c + 1) * n, nh, nkv, c * n, 0, hd, scale, dpr, dscr, dout);
           CK(cudaMemcpy(rc.data() + i0 * hd, dout, (size_t)m * hd * 4, cudaMemcpyDeviceToHost));
         }
       };
@@ -1130,7 +1129,7 @@ int main(int argc, char** argv) {
     // stale cache (>= 2 chunks): keys shifted by one token, q_offset == st.len: the fingerprint must force a redo
     if (nc >= 2) {
       apa::Problem ps = chunk(nc - 2);
-      const apa::FlatKV<T> rs{K + (size_t)nkv * 128, V + (size_t)nkv * 128};
+      const apa::FlatKV<T> rs{K + (size_t)nkv * hd, V + (size_t)nkv * hd};
       st.len = st.stats_len = ps.q_offset;
       if (!apa::prefill_incremental(Q, rs, O, ps, eps, st, ws, wsb, 0)) std::exit(6);
       std::vector<T> h1(nq), h2(nq);

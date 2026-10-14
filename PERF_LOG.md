@@ -3556,3 +3556,41 @@ syn_122880_24 5.898 / 5.895 ms. A first build with runtime window checks (no tem
 
 bench/test.sh (NOBUILD=1, REF=3d71e0d build): 60 ok, 0 FAIL; sliding window exact = windowed ref (flat KV window,
 every tile `-DAPA_WIN=0`, `APA_SPARSE=8192` q_offset > 0), window >= kv bitwise = causal.
+
+## 2026-10-15 Head dim 256 (branch hd256, base 6df61cd)
+
+Synthetic dumps: `syn:2048,32768,16,4,1,256` (syn256_32768), `syn:2048,122880,16,2,2,256` (syn256_122880). No real
+hd 256 dump; no accuracy claim beyond these. Default build; ptxas hd 256 causal flat: 80 bytes spill stores.
+
+hd 128 kernels vs 6df61cd (cuobjdump -sass, instruction text without addresses): causal flat 9512, paged 10272,
+causal flat SW 9720, paged SW 10456, non-causal flat 9360, paged 10096 instructions, 0 differ in all 6.
+
+eps 0.005, 3 runs (`APA_EPS=0.005`):
+
+```
+syn256_32768 apa eps    5e-03: cos 0.999964 min 0.992228  hot  48.0 % p2load  68.9 %  attn 3.887 ms (pass2 2.516) 274.1 TOPS  (prep 0.081 ms)
+syn256_122880 apa eps    5e-03: cos 0.999870 min 0.984209  hot  20.7 % p2load  35.1 %  attn 7.579 ms (pass2 2.567) 539.5 TOPS  (prep 0.060 ms)
+syn256_32768 apa eps    5e-03: cos 0.999964 min 0.992228  hot  48.0 % p2load  68.9 %  attn 3.885 ms (pass2 2.514) 274.2 TOPS  (prep 0.079 ms)
+syn256_122880 apa eps    5e-03: cos 0.999870 min 0.984209  hot  20.7 % p2load  35.1 %  attn 7.630 ms (pass2 2.576) 535.9 TOPS  (prep 0.060 ms)
+syn256_32768 apa eps    5e-03: cos 0.999964 min 0.992228  hot  48.0 % p2load  68.9 %  attn 3.931 ms (pass2 2.517) 271.0 TOPS  (prep 0.159 ms)
+syn256_122880 apa eps    5e-03: cos 0.999870 min 0.984209  hot  20.7 % p2load  35.1 %  attn 7.568 ms (pass2 2.572) 540.3 TOPS  (prep 0.059 ms)
+syn256_32768 apa eps   -1e+00: cos 0.999986 min 0.999937  hot  75.0 % p2load  75.0 %  attn 4.604 ms (pass2 4.649) 231.3 TOPS  (prep 0.080 ms)
+syn256_32768 apa eps    1e-02: cos 0.999952 min 0.989024  hot  28.5 % p2load  45.3 %  attn 2.710 ms (pass2 1.277) 393.1 TOPS  (prep 0.079 ms)
+syn256_122880 apa eps   -1e+00: cos 0.999953 min 0.999783  hot  75.1 % p2load  75.1 %  attn 17.485 ms (pass2 17.557) 233.8 TOPS  (prep 0.104 ms)
+syn256_122880 apa eps    1e-02: cos 0.999863 min 0.984101  hot  15.6 % p2load  28.8 %  attn 6.333 ms (pass2 1.294) 645.6 TOPS  (prep 0.124 ms)
+```
+
+Mean attn eps 0.005: syn256_32768 3.901 ms, syn256_122880 7.592 ms.
+
+All pairs (test.sh, `APA_FULL=1`, eps 0.005), hd 256 and hd 128 synthetic for comparison:
+
+```
+syn256_32768  full eps    5e-03: pairs 32768 pooled cos 0.999956 mean cos 0.997468 min 0.990454 | cos<0.99 0 cos<0.9 0 cos<0 0 | relL2 mean 0.05971 p50 0.06190 p99 0.11878 p999 0.12756 max 0.14013
+syn256_122880 full eps    5e-03: pairs 32768 pooled cos 0.999879 mean cos 0.993578 min 0.983569 | cos<0.99 7920 cos<0.9 0 cos<0 0 | relL2 mean 0.10418 p50 0.12845 p99 0.16453 p999 0.17346 max 0.18569
+syn_32768_24  full eps    5e-03: pairs 49152 pooled cos 0.999991 mean cos 0.998525 min 0.988997 | cos<0.99 5 cos<0.9 0 cos<0 0 | relL2 mean 0.03926 p50 0.02036 p99 0.12170 p999 0.13371 max 0.14946
+syn_122880_24 full eps    5e-03: pairs 49152 pooled cos 0.999991 mean cos 0.996499 min 0.981355 | cos<0.99 4439 cos<0.9 0 cos<0 0 | relL2 mean 0.06495 p50 0.04796 p99 0.16452 p999 0.17897 max 0.19565
+```
+
+bench/test.sh NOBUILD=1: DUMPS=build/syn256 38 ok, ALL OK (window = every tile, determinism, batch 2, paged = flat,
+chunked = requant at restats, stale cache, forced overflow redo, 3 slots, sliding window exact / >= kv = causal);
+DUMPS=syn_32768_24 + syn_122880_24, REF=6df61cd build: 40 ok, default = REF bitwise. REF runs only on hd 128 dumps.
