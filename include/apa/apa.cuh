@@ -65,9 +65,12 @@ struct Workspace {
   uint32_t* ready;     // [bhk][nqb] pass-1 segments done; after warp_hot (one memset)
   uint32_t* ticket;    // [2] fused launch: CTA tickets, pass-2 group items; after ready
   uint32_t *qdone, *pdone;  // [nseg][bhk] window counters (nseg > 1); after ticket
+  uint32_t* p2ready;        // [bhk][nqb] pass-2 segments done (nseg > 1); after pdone
   float* part;                   // [rows][D] cold-tile partials (rows: bhk * rp)
   float2* ml;                    // [rows] (m, l) of the partials
   float4* carry;                 // [rows] row state between pass-1 segments (nseg > 1)
+  uint4* p2o;                    // pass-2 O between segments (nseg > 1): rows * D * 2 B (APA_P2_F32O: 4 B)
+  float4* p2ml;                  // pass-2 (m, l) per lane between segments (nseg > 1): rows * 32 B
   int W, nqb, rp;                // mask words per warp / CTA, q blocks per (b, kv head), rows per (b, kv head)
   int S, nseg;                   // KV window: tiles per segment (0: none), pass-1 segments
   int kvcap;                     // KV / hs / ksum from a KvState of this many tiles (0: own, ntkv)
@@ -112,14 +115,20 @@ inline Workspace carve(const Problem& p, void* base, bool own_kv = true, int win
   w.Qs = take(rows * p.D / 16 * 2);
   if (own_kv) w.KV = take(bhk * (wnd ? 1 + (size_t)WIN_SLOTS * w.S : (size_t)dm.ntkv) * tile_bytes(p.D));
   const size_t cnt = w.nseg > 1 ? 2 * (size_t)w.nseg * bhk : 0;
-  w.warp_hot = reinterpret_cast<uint32_t*>(take((bhk * w.nqb * (NW * w.W + 1) + 2 + cnt) * 4));
+  const size_t p2r = cnt ? bhk * w.nqb : 0;  // p2ready
+  w.warp_hot = reinterpret_cast<uint32_t*>(take((bhk * w.nqb * (NW * w.W + 1) + 2 + cnt + p2r) * 4));
   w.ready = w.warp_hot + bhk * w.nqb * NW * w.W;
   w.ticket = w.ready + bhk * w.nqb;
   w.qdone = w.ticket + 2;
   w.pdone = w.qdone + cnt / 2;
+  w.p2ready = w.pdone + cnt / 2;
   w.part = reinterpret_cast<float*>(take(rows_p * p.D * 4));
   w.ml = reinterpret_cast<float2*>(take(rows_p * 8));
-  if (w.nseg > 1) w.carry = reinterpret_cast<float4*>(take(rows_p * 16));
+  if (w.nseg > 1) {
+    w.carry = reinterpret_cast<float4*>(take(rows_p * 16));
+    if (APA_P2_SEG) w.p2o = reinterpret_cast<uint4*>(take(rows_p * p.D * (APA_P2_F32O ? 4 : 2)));
+    if (APA_P2_SEG) w.p2ml = reinterpret_cast<float4*>(take(rows_p * 32));
+  }
   w.nchunk = (dm.ntkv + STATS_TILES - 1) / STATS_TILES;
   w.kpart = reinterpret_cast<float*>(take(bhk * w.nchunk * p.D * 4));
   w.bytes = off;
@@ -274,7 +283,7 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
   Dims dm = make_dims(p);
   if (w.kvcap > 0) dm.kvcap = w.kvcap;
   const size_t bhk = (size_t)p.B * p.Hkv, masks = bhk * w.nqb * (NW * w.W + 1) * 4;  // warp_hot + ready
-  const size_t cnt = 2 + (w.nseg > 1 ? 2 * (size_t)w.nseg * bhk : 0);               // tickets + counters
+  const size_t cnt = 2 + (w.nseg > 1 ? (2 * (size_t)w.nseg + w.nqb) * bhk : 0);    // tickets + counters
   cudaError_t e = cudaSuccess;
   if (gate != nullptr) {  // window redo (eps >= 0): zero only if it runs (else the masks of the first launch stay)
     zero_if_kernel<<<64, 256, 0, st>>>(w.warp_hot, masks / 4 + cnt, gate);
@@ -289,9 +298,11 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
   }
   if (e != cudaSuccess) return e;
 #ifdef APA_DBG
-  const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.carry, w.rp, w.nseg, w.dbg};
+  const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.carry, w.rp, w.nseg, w.dbg,
+                     w.p2ready, w.p2o, w.p2ml};
 #else
-  const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.carry, w.rp, w.nseg};
+  const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.carry, w.rp, w.nseg,
+                     w.p2ready, w.p2o, w.p2ml};
 #endif
   Win wn{};
   wn.nseg = w.nseg;
@@ -305,16 +316,18 @@ inline cudaError_t launch_d(const T* Q, const RS& rs, T* O, const Problem& p, co
     wn.qpb = (w.S + WIN_QT - 1) / WIN_QT;
   }
   // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
-  static int nsm = 0, attr_dev[2] = {-1, -1};
+  static int nsm = 0, attr_dev[4] = {-1, -1, -1, -1};
   int dev = 0;
   if ((e = cudaGetDevice(&dev)) != cudaSuccess) return e;
   if (nsm == 0 && (e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev)) != cudaSuccess) return e;
   const int n1 = (with_pass1 && eps >= 0.f) ? (int)bhk * w.nqb : 0;
   const int sw = CAUSAL && dm.swin > 0;  // sliding window kernel (causal only)
-  auto k = sw ? apa_kernel<D, CAUSAL, CAUSAL, T, RS> : apa_kernel<D, CAUSAL, false, T, RS>;
-  if (attr_dev[sw] != dev) {
+  const int seg = APA_P2_SEG && w.nseg > 1 && n1 > 0;  // pass 2 per KV-window segment
+  auto k = sw ? (seg ? apa_kernel<D, CAUSAL, CAUSAL, true, T, RS> : apa_kernel<D, CAUSAL, CAUSAL, false, T, RS>)
+              : (seg ? apa_kernel<D, CAUSAL, false, true, T, RS> : apa_kernel<D, CAUSAL, false, false, T, RS>);
+  if (attr_dev[sw * 2 + seg] != dev) {
     if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess) return e;
-    attr_dev[sw] = dev;
+    attr_dev[sw * 2 + seg] = dev;
   }
   k<<<nsm, NW * 32, smem, st>>>(w.Qq, w.Qs, w.Qr, w.KV, w.hs, Q, rs, O, dm, p.scale * LOG2E, out, n1, w.nqb, w.ticket,
                                 wn, gate);

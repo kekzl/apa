@@ -14,7 +14,7 @@
 \title{APA: Adaptive-Precision Attention\\
 \large Exact FP16 for the Few Tiles That Matter, FP4 for the Rest}
 \author{Raphael Friedmann\\\small\url{https://github.com/kekzl/apa}}
-\date{October 2026, APA 0.7.0}
+\date{October 2026, APA 0.8.0}
 
 \begin{document}
 \maketitle
@@ -267,6 +267,13 @@ pass 2 from a second counter. Every wait (quantized segment, previous segment of
 slot reuse, pass 1 before pass 2) is on an earlier ticket held by a running CTA, so the scheme cannot
 deadlock. Ready flags are set with a release store after a fence and read with acquire semantics. Pass-2
 work fills the SMs left idle by pass 1's last wave.
+
+Since 0.8.0, with the KV window, pass 2 of segment $k$ is a ticket after pass 1 of segment $k+1$; the last
+segment runs from the second counter and merges. Between segments each lane stores its FP16 output registers
+and $(m, \ell)$, and pass 2 walks the sink tile, then tiles descending (the pass-1 order, the same for any
+segmentation), so the outputs equal one pass bitwise. Idle SM time drops from 7.6\,\% to 1.4\,\% of the span
+(122880 keys); prep plus attention: $-1.55$ to $-14.32$\,\% on synthetic inputs, for $\mathit{rows}\cdot(2d+32)$
+bytes more workspace.
 
 \subsection{KV window}
 

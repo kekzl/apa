@@ -7,11 +7,11 @@ few KV tiles; APA computes those exactly and the rest in FP4.
 |---|---|
 | Prep | K mean and head scales (sampled stats); Q (two terms), K, V to E2M1 with one UE4M3 scale per 16 values: the code in nearest(amax / 6) + {0, -1, 1, -2, 3 .. 6} with the least squared error (f16x2 ranking) |
 | Pass 1 | all-FP4 flash attention (`mma.sync kind::mxf4nvf4`) over all 64-key tiles, Q as two E2M1 terms (term 2 = residual of term 1), P scales per 16 keys in UE4M3; a tile whose share of the running row sum exceeds `eps` is hot: no P·V here, bit in a per-warp mask |
-| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only; one K/V tile stream per q block shared by its warps (12 at hd 128; 8 at hd 256, 32-key half tiles) |
+| Pass 2 | exact FP16 attention (`mma.sync m16n8k16`) over the hot tiles only, sink tile first, then the diagonal backwards (pass-1 order); one K/V tile stream per q block shared by its warps (12 at hd 128; 8 at hd 256, 32-key half tiles) |
 | Merge | log-sum-exp of the cold-tile partials (pass 1) and the hot result (pass 2) |
 | KV window | FP4 K/V of the sink tile + 2 ring slots of 96 tiles per KV head (13.6 MiB at Hkv 8, any context); pass 1 walks the keys in segments, its row state crosses them; quantized inside the launch one segment ahead; bitwise equal to every tile quantized ahead |
 | Sliding window | `Problem::window` w: query at pos sees keys (pos - w, pos]; CTAs and warps skip tiles below the window, the lower edge is masked in pass 1 and pass 2; KV-window segments below the first query's window are neither quantized nor walked; a window covering every key runs the plain causal kernel (bitwise equal) |
-| Launch | one persistent kernel (grid = SMs) on ticket counters: quant items, pass-1 segments per q block, then pass 2 on whole q blocks; ready flags per q block |
+| Launch | one persistent kernel (grid = SMs) on ticket counters: quant items, pass-1 segments per q block, pass 2 of segment k after pass 1 of segment k + 1 (KV window; state carried bit-exact: outputs equal one pass), last pass-2 segment on whole q blocks; ready flags per q block |
 
 Scope: head dim 128 or 256 (hd 256: 8 warps per CTA, 4 pass-1 stages; synthetic dumps only), causal (`q_offset` = position of Q row 0), GQA (`H % Hkv == 0`), FP16 Q/K/V. K/V flat, or a
 paged FP16 pool through a block table plus a flat tail (chunked prefill). Causal sliding window
@@ -129,13 +129,30 @@ Sliding window (`APA_SWA`), synthetic dumps (2048 queries at the end of the cont
 | syn_122880_24 | 4096 | 0.804 | 6.053 | 7.53x | 3.4 % | 0.999884 |
 | syn_122880_24 | 32768 | 3.182 | 6.053 | 1.90x | 26.9 % | 0.991012 |
 
-Head dim 256, synthetic dumps `syn:2048,kv,16,nkv,seed,256` (2048 queries at the end of the context, 16 q heads),
-attn ms (prep 0.059 to 0.159 ms), eps 0.005 mean of 3 reps; all pairs vs FP32; PERF_LOG.md, 2026-10-15:
+Head dim 256 (APA 0.7.0), synthetic dumps `syn:2048,kv,16,nkv,seed,256` (2048 queries at the end of the context, 16
+q heads), attn ms (prep 0.059 to 0.159 ms), eps 0.005 mean of 3 reps; all pairs vs FP32; PERF_LOG.md, 2026-10-15:
 
 | Dump | Hkv | eps -1 (every tile exact) | eps 0.01 | eps 0.005 | hot | min cos | pairs < 0.99 |
 |---|---|---|---|---|---|---|---|
 | syn256_32768 | 4 | 4.604 | 2.710 | 3.901 | 48.0 % | 0.990454 | 0 of 32768 |
 | syn256_122880 | 2 | 17.485 | 6.333 | 7.592 | 20.7 % | 0.983569 | 7920 of 32768 |
+
+APA 0.8.0 vs 0.7.0 (pass 2 per KV-window segment), synthetic dumps, eps 0.005, prep + attn ms, mean of 3 reps
+interleaved; all pairs vs FP32 from bench/test.sh; PERF_LOG.md, 2026-10-15:
+
+| Dump | 0.7.0 ms | 0.8.0 ms | change | min cos 0.7.0 / 0.8.0 | pairs < 0.99 0.7.0 / 0.8.0 |
+|---|---|---|---|---|---|
+| syn_122880_24, 4096 keys | 0.527 | 0.514 | -2.47 % | | |
+| syn_122880_24, 12288 keys | 1.531 | 1.507 | -1.55 % | | |
+| syn_32768_24 | 2.788 | 2.490 | -10.70 % | 0.988997 / 0.989082 | 5 / 5 |
+| syn_122880_24 | 5.905 | 5.730 | -2.95 % | 0.981355 / 0.981427 | 4439 / 4429 |
+| syn_122880_24, imp sparse call (24576 keys) | 2.621 | 2.379 | -9.24 % | | |
+| syn256_122880, 12288 keys | 2.046 | 2.011 | -1.69 % | | |
+| syn256_32768 | 3.958 | 3.391 | -14.32 % | 0.990454 / 0.990431 | 0 / 0 |
+| syn256_122880 | 7.657 | 7.040 | -8.05 % | 0.983569 / 0.983570 | 7920 / 7916 |
+
+Workspace (`workspace_bytes`), 0.7.0 -> 0.8.0: imp bound Sq 4096 Skv 108000 H 24 Hkv 8 79.4 -> 106.4 MiB, Sq 2048 Skv
+122880 46.8 -> 60.3 MiB, hd 256 Sq 4096 Skv 131072 H 16 Hkv 2 91.8 -> 125.8 MiB; `-DAPA_P2_SEG=0` keeps the 0.7.0 sizes.
 
 ## API (`include/apa/apa.cuh`, namespace `apa`)
 

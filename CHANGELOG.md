@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0 (2026-10-15)
+
+- KV window: pass 2 per segment. Pass 2 of segment k is a ticket after pass 1 of segment k + 1 (was: every q block
+  after the last segment); the last segment merges. Lane state between segments: FP16 O registers + (m, l) in the
+  workspace; outputs equal one pass bitwise (test.sh: `-DAPA_P2_SEG=0`, `-DAPA_P2_EARLY=1` = default, cmp). Trace,
+  122880 keys: idle 7.6 -> 1.4 %. prep + attn vs 0.7.0, synthetic dumps, eps 0.005, mean of 3: 4096 / 12288 / 32768 /
+  122880 keys -2.47 / -1.55 / -10.70 / -2.95 %, imp sparse call shape (24576 keys) -9.24 %, hd 256 12288 / 32768 /
+  122880 keys -1.69 / -14.32 / -8.05 %. Kernel template `P2S`: launches without KV window run no mid items.
+- Pass 2 order: sink tile, then tiles descending (pass-1 order; was ascending). Outputs differ from 0.7.0 in the last
+  bits; all pairs vs FP32, 0.7.0 -> 0.8.0 (min cos, pairs < 0.99): syn_32768_24 0.988997 / 5 -> 0.989082 / 5,
+  syn_122880_24 0.981355 / 4439 -> 0.981427 / 4429, syn256_32768 0.990454 / 0 -> 0.990431 / 0, syn256_122880 0.983569 /
+  7920 -> 0.983570 / 7916. No window, 122880 keys: +1.7 % vs ascending (kept: window = every tile stays bitwise).
+- Workspace (nseg > 1): + rows * (2 D + 32) bytes. Sq 4096 Skv 108000 H 24 Hkv 8: 79.4 -> 106.4 MiB; Sq 2048 Skv
+  122880: 46.8 -> 60.3 MiB; hd 256 Sq 4096 Skv 131072 H 16 Hkv 2: 91.8 -> 125.8 MiB. `-DAPA_P2_SEG=0`: 0.7.0 sizes.
+- test.sh: hd 128 and hd 256 synthetic dumps 42 ok each (PERF_LOG.md, 2026-10-15).
+
 ## 0.7.0 (2026-10-15)
 
 - Head dim 256 (`Problem::D` 256) on every entry point (flat, paged, incremental, KV window, sliding window): 8 warps

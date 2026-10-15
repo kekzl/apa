@@ -2,7 +2,8 @@
 # Test matrix on a GPU. DUMPS: dir of dump *.bin (all used), OUT: logs (build/test), IMAGE (imp:toolchain),
 # REF: optional bench binary in build/ of an earlier commit with the same kernel; outputs must match bitwise.
 # Checks per dump: determinism, batch 2, paged vs flat, chunked vs requant at restats, stale cache, KV window vs
-# every tile ahead, all-pairs accuracy (no NaN, no negative cos); forced prep overflow redo vs exact stats (window
+# every tile ahead, pass 2 per window segment vs at the end / after segment 0 (bitwise), all-pairs accuracy (no NaN,
+# no negative cos); forced prep overflow redo vs exact stats (window
 # redo on dumps over 12352 keys); sliding window (APA_SWA, flat and every tile, q_offset > 0) vs a windowed FP32 ref,
 # window >= kv vs causal. Synthetic dumps: build/bench_apa syn:n,kv,nh,nkv,seed[,hd] with APA_SAVE=file.
 # NOBUILD=1: reuse build/test_* (build them first without a GPU). Exit 1 on any failed check.
@@ -32,7 +33,7 @@ none() { ! grep -qE "$2" "$OUT/$1.log"; }
 
 for v in "def:" "ps0:-DAPA_PREP_SAMPLE=0" "pp2:-DAPA_PREP_SAMPLE=1000000" "pov:-DAPA_PREP_HEADROOM=0.015625f" \
          "dbg:-DAPA_DBG" "f32o:-DAPA_P2_F32O=1" "xm:-DAPA_EXACT_MAX" "ns3:-DAPA_WIN_SLOTS=3" \
-         "w0:-DAPA_WIN=0"; do
+         "w0:-DAPA_WIN=0" "s0:-DAPA_P2_SEG=0" "e1:-DAPA_P2_EARLY=1"; do
   [ -n "${NOBUILD:-}" ] || check "build ${v%%:*}" build "${v%%:*}" "${v#*:}"
 done
 for f in "$DUMPS"/*.bin; do
@@ -51,6 +52,11 @@ for f in "$DUMPS"/*.bin; do
   run test_pov "$d" "${d}_pov" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_pov
   run test_pp2 "$d" "${d}_pp2" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_pp2
   check "$d forced overflow redo = exact stats" cmp -s "$OUT/${d}_pov_0.005000" "$OUT/${d}_pp2_0.005000"
+  run test_def "$d" "${d}_dout" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_dout
+  for sv in s0 e1; do  # pass 2 per segment (state carried) vs all at the end / after segment 0 only: bitwise
+    run test_$sv "$d" "${d}_$sv" -e APA_EPS=0.005 -e APA_OUT=/w/$OUT/${d}_$sv
+    check "$d pass 2 per segment = $sv" cmp -s "$OUT/${d}_dout_0.005000" "$OUT/${d}_${sv}_0.005000"
+  done
   run test_ns3 "$d" "${d}_ns3" -e APA_EPS=0.005 -e APA_WIN=32,64,96
   check "$d window, 3 slots run" has "${d}_ns3" "^window S 96"
   check "$d window, 3 slots = every tile" none "${d}_ns3" "^window S .* [1-9][0-9]* of [0-9]+ output elements differ"

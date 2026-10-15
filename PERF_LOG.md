@@ -3594,3 +3594,85 @@ syn_122880_24 full eps    5e-03: pairs 49152 pooled cos 0.999991 mean cos 0.9964
 bench/test.sh NOBUILD=1: DUMPS=build/syn256 38 ok, ALL OK (window = every tile, determinism, batch 2, paged = flat,
 chunked = requant at restats, stale cache, forced overflow redo, 3 slots, sliding window exact / >= kv = causal);
 DUMPS=syn_32768_24 + syn_122880_24, REF=6df61cd build: 40 ok, default = REF bitwise. REF runs only on hd 128 dumps.
+
+## 2026-10-15 Pass 2 per KV-window segment (base 579aabd = APA 0.7.0)
+
+Item trace (`-DAPA_TRACE`, 0.7.0, eps 0.005, `APA_WIN=96`): with the KV window pass 2 starts after the last pass-1
+segment (every q block finishes pass 1 in the last segment wave):
+
+```
+syn_122880_24 trace win 0: 512 items (q 0 p1 256 p2 256) on 170 SMs, span 5499.7 us | pass-1 end 4681.1, pass 2 2378.4 .. 5499.7 | SM-us work q 0 p1 600637 p2 222558, wait q 0 p1 0 p2 37489, idle 74272 (7.9 %)
+syn_122880_24 trace win 96: 7136 items (q 1760 p1 5120 p2 256) on 170 SMs, span 6101.5 us | pass-1 end 4412.5, pass 2 4286.6 .. 6101.5 | SM-us work q 90819 p1 634684 p2 223398, wait q 297 p1 7895 p2 1094, idle 79064 (7.6 %)
+syn256_122880 trace win 0: 512 items (q 0 p1 256 p2 256) on 170 SMs, span 6944.3 us | pass-1 end 5752.6, pass 2 2912.8 .. 6944.3 | SM-us work q 0 p1 738736 p2 316993, wait q 0 p1 0 p2 20325, idle 104480 (8.9 %)
+syn256_122880 trace win 96: 5816 items (q 440 p1 5120 p2 256) on 170 SMs, span 7681.9 us | pass-1 end 5234.5, pass 2 5077.3 .. 7681.9 | SM-us work q 60079 p1 785819 p2 316133, wait q 4745 p1 25502 p2 854, idle 112793 (8.6 %)
+syn256_32768 trace win 96: 2056 items (q 264 p1 1536 p2 256) on 170 SMs, span 4095.6 us | pass-1 end 1441.9, pass 2 1368.5 .. 4095.6 | SM-us work q 30431 p1 187822 p2 354795, wait q 688 p1 17818 p2 932, idle 103764 (14.9 %)
+```
+
+Change: pass-2 item P2(k) per (q block, segment k) in the ticket stream after pass 1 of segment k + 1; the last
+segment from ticket[1] merges. State between items: O registers (f16 bits) + (m, l) per lane, so the result equals
+one pass bitwise. Pass-2 order: sink tile, then tiles descending (pass-1 order; any segmentation gives the same
+order). Kernel template `P2S`: launches without KV window run a kernel without the mid items. Workspace (nseg > 1):
++ rows * (2 D + 32) bytes.
+
+Same trace, new build (y_p2str), 2 runs (first two lines shortened by sed):
+
+```
+y_p2str win 96 span 6218.0 q 89766 p1 682949 p2 243668 wp2 17343 idle 15063
+y_p2str win 96 span 6214.5 q 89781 p1 682181 p2 243643 wp2 17244 idle 15364
+syn256_32768 trace win 96: 3336 items (q 264 p1 1536 p2 1536) on 170 SMs, span 3527.1 us | pass-1 end 3483.1, pass 2 498.4 .. 3527.1 | SM-us work q 30664 p1 191531 p2 348783, wait q 54 p1 18095 p2 4967, idle 5508 (0.9 %)
+```
+
+Idle 7.6 % -> 1.4 %; p2 work +20k SM-us (5120 items instead of 256). Trace builds show p1 +7 % even without window
+(trace7 win 0 p1 602934 / 605756 / 601122, new 653011 / 653547); the non-trace bench does not (rows below).
+
+prep + attn ms, mean (min..max) of 3 reps interleaved, eps 0.005 (`build/ab.sh`, `build/sum.sh`); base7 = 579aabd,
+y_p2s = this change (final build SASS-identical to y_p2s, 24 kernels):
+
+```
+syn_122880_24_kv12288 0.005 base7        1.531 (1.528..1.535)  +0.00 %
+syn_122880_24_kv12288 0.005 y_p2s        1.507 (1.504..1.510)  -1.55 %
+syn_122880_24_kv4096 0.005 base7        0.527 (0.519..0.541)  +0.00 %
+syn_122880_24_kv4096 0.005 y_p2s        0.514 (0.512..0.517)  -2.47 %
+syn256_122880_kv12288 0.005 base7        2.046 (2.035..2.061)  +0.00 %
+syn256_122880_kv12288 0.005 y_p2s        2.011 (1.999..2.035)  -1.69 %
+syn_32768_24 0.005     base7        2.788 (2.786..2.792)  +0.00 %
+syn_32768_24 0.005     y_p2s        2.490 (2.483..2.502) -10.70 %
+syn_122880_24 0.005    base7        5.905 (5.879..5.939)  +0.00 %
+syn_122880_24 0.005    y_p2s        5.730 (5.721..5.738)  -2.95 %
+syn_122880_24_srse24576 0.005 base7        2.621 (2.619..2.624)  +0.00 %
+syn_122880_24_srse24576 0.005 y_p2s        2.379 (2.377..2.380)  -9.24 %
+syn256_32768 0.005     base7        3.958 (3.954..3.964)  +0.00 %
+syn256_32768 0.005     y_p2s        3.391 (3.370..3.419) -14.32 %
+syn256_122880 0.005    base7        7.657 (7.621..7.697)  +0.00 %
+syn256_122880 0.005    y_p2s        7.040 (7.020..7.052)  -8.05 %
+```
+
+(kv: `APA_KV` keys, no window; srse24576: `APA_SPARSE=24576`, imp sparse call shape.)
+
+Variants, same method, vs base7 (3 reps): mid items only for segment 0 / 0..1 (`APA_P2_EARLY=1/2`): -0.44 to -3.79 %
+/ -3.50 to -7.30 %; every segment (default): -2.68 to -14.56 %; Q only in warps with an own hot tile: +9.44 to
++69.87 %; one pass2_cta call site for both item kinds: +0.29 to +1.92 % vs two; `__noinline__` pass1_cta / pass2_cta /
+both: +3.68 / +0.47 / +2.86 % (syn_122880_24), up to +14.17 % (hd 256); kernel without `P2S` split (mid-item code in
+every launch): no window +1.68 / +2.53 % instead of -1.55 / -2.47 %.
+
+No window, 122880 keys (`APA_WIN=0` comparison line, prefill ms, 3 runs): base7 5.938 / 5.956 / 5.964, new order
+6.078 / 6.080 / 6.082, ascending order (0.7.0) with the new code 5.975 / 5.980 / 5.990: the descending order costs
+1.7 % there; at 4096 / 12288 keys it is faster (-1.84 / -1.52 % vs ascending -0.76 / -0.87 %). Kept for the bitwise
+window = every tile property.
+
+Segment size (`APA_WIN=S`, new build, prefill ms mean of 3, workspace MiB): syn_122880_24 S 64 / 96 / 128 / 192 / 256:
+6.092 / 6.051 / 6.017 / 5.978 / 5.901, 55.8 / 60.3 / 64.8 / 73.8 / 82.8; syn256_122880: 7.533 / 7.361 / 7.286 / 7.234 /
+7.122. Default stays 96.
+
+Pass-1 variants on the new build vs y_p2s (2 reps): 8 warps per CTA at hd 128 (`APA_NW128=8`, 255 registers, no
+spills), 8 or 6 stages: +4.08 to +9.39 % (hd 256 unaffected); producer refill one step late (`APA_P1_LAG=1`): -1.77 to
++0.24 %; one empty-barrier arrive per warp (`APA_P1_WARRIVE=1`): -3.05 to +2.54 %. Not kept; both knobs and `APA_INL1` / `APA_INL2` removed (default build SASS-identical, 24 kernels).
+
+`workspace_bytes` (host, `build/wsq.cu`), 0.7.0 -> this change: Sq 4096 Skv 108000 H 24 Hkv 8: 79.4 -> 106.4 MiB;
+Sq 2048 Skv 122880: 46.8 -> 60.3; Sq 2048 Skv 26624: 45.9 -> 59.4; Sq 4096 Skv 131072 H 16 Hkv 2 hd 256: 91.8 ->
+125.8. `-DAPA_P2_SEG=0`: 0.7.0 sizes and schedule, new pass-2 order.
+
+bench/test.sh (`NOBUILD=1`, build/t128b, build/t256b): hd 128 dumps 42 ok, hd 256 dumps 42 ok, ALL OK; pass 2 per
+segment = `APA_P2_SEG=0` = `APA_P2_EARLY=1` bitwise on all 4 dumps. All pairs vs FP32 (`full` line), 0.7.0 -> this
+change, min cos / pairs < 0.99: syn_32768_24 0.988997 / 5 -> 0.989082 / 5; syn_122880_24 0.981355 / 4439 -> 0.981427 /
+4429; syn256_32768 0.990454 / 0 -> 0.990431 / 0; syn256_122880 0.983569 / 7920 -> 0.983570 / 7916.

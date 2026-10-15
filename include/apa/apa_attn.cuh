@@ -23,6 +23,10 @@ struct Pass1Out {
 #ifdef APA_DBG
   float4* dbg;  // [rows]: (m, lambda, l_cold, max tile share at test time), lambda / l_cold in ml units
 #endif
+  // pass 2 per segment (nseg > 1): state between items, per warp tile ((bhk * nqb + qb) * NW + warp)
+  uint32_t* p2ready;  // [bhk * nqb + qb]: pass-2 segments done
+  uint4* p2o;         // [warp tile][words / 4][32 lanes]: O accumulator registers
+  float4* p2ml;       // [warp tile][32 lanes]: (m_lo, m_hi, l_lo, l_hi)
 };
 
 // Lazy row max: m may lag the true row max by up to TAU (-DAPA_EXACT_MAX: exact).

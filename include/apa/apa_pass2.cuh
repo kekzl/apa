@@ -74,9 +74,13 @@ struct Launch<64> {
 #endif
   static constexpr int NW = APA_NW64, ST = APA_ST64;
 };
+#ifndef APA_NW128
+#define APA_NW128 12
+#define APA_ST128 6
+#endif
 template <>
 struct Launch<128> {
-  static constexpr int NW = 12, ST = 6;
+  static constexpr int NW = APA_NW128, ST = APA_ST128;
 };
 template <>
 struct Launch<256> {
@@ -104,7 +108,7 @@ struct P2Cfg {
 template <int DT>
 struct OAcc {
 #if APA_P2_F32O
-  float v[DT][4];
+  alignas(16) float v[DT][4];
   __device__ __forceinline__ void zero() {
 #pragma unroll
     for (int i = 0; i < DT; ++i) v[i][0] = v[i][1] = v[i][2] = v[i][3] = 0.f;
@@ -129,7 +133,7 @@ struct OAcc {
     }
   }
 #else
-  uint32_t v[DT][2];
+  alignas(16) uint32_t v[DT][2];
   __device__ __forceinline__ void zero() {
 #pragma unroll
     for (int i = 0; i < DT; ++i) v[i][0] = v[i][1] = 0u;
@@ -195,28 +199,40 @@ __device__ __forceinline__ void row_shift(const uint32_t (&qa)[D / 16][4], const
   sh_hi *= qmul;
 }
 
-// Next tile after t in the union of NW warps' masks (W words each); -1 at t_end.
+// Pass-2 tile range of one item: sink tile 0 (if sink), then tiles [lo, hi) (lo >= 1).
+struct P2Range {
+  int lo, hi;
+  bool sink;
+};
+
+// Highest tile in [lo, below) of the union of NW warps' masks (W words each); -1: none.
 template <int NW>
-__device__ __forceinline__ int next_tile(const uint32_t* whot0, int W, int t, int t_end) {
-  for (int w = (t + 1) >> 5; w * 32 < t_end; ++w) {
+__device__ __forceinline__ int prev_tile(const uint32_t* whot0, int W, int below, int lo) {
+  if (below <= lo) return -1;
+  for (int w = (below - 1) >> 5; w >= (lo >> 5); --w) {
     uint32_t bits = 0u;
 #pragma unroll
     for (int i = 0; i < NW; ++i) bits |= whot0[i * W + w];
-    if (w == (t + 1) >> 5) bits &= ~0u << ((t + 1) & 31);
-    if (bits) {
-      const int n = w * 32 + __ffs(bits) - 1;
-      return n < t_end ? n : -1;
-    }
+    if (w == (below - 1) >> 5 && (below & 31)) bits &= (1u << (below & 31)) - 1u;
+    if (w == (lo >> 5)) bits &= ~0u << (lo & 31);
+    if (bits) return w * 32 + 31 - __clz(bits);
   }
   return -1;
 }
 
-// Next step after st (SUB steps of P2Cfg::BT keys per KV tile, -1: start) in the union; -1 at t_end.
+// Next step after st (SUB steps of P2Cfg::BT keys per KV tile, -1: start) in the union: the sink tile, then tiles
+// hi - 1 .. lo (pass-1 order: segments of the KV window chain to one pass over every tile); -1 at the end.
 template <int NW, int SUB>
-__device__ __forceinline__ int next_step(const uint32_t* whot0, int W, int st, int t_end) {
+__device__ __forceinline__ int next_step(const uint32_t* whot0, int W, int st, const P2Range& rg) {
   if (SUB > 1 && st >= 0 && st % SUB != SUB - 1) return st + 1;
-  const int t = next_tile<NW>(whot0, W, SUB == 1 ? st : st < 0 ? -1 : st / SUB, t_end);
-  return SUB == 1 || t < 0 ? t : t * SUB;
+  const int t = st < 0 ? -1 : st / SUB;
+  uint32_t b0 = 0u;
+  if (t < 0 && rg.sink) {
+#pragma unroll
+    for (int i = 0; i < NW; ++i) b0 |= whot0[i * W];
+  }
+  const int n = (b0 & 1u) ? 0 : prev_tile<NW>(whot0, W, t <= 0 ? rg.hi : t, rg.lo);
+  return n < 0 ? -1 : n * SUB;
 }
 
 // S = Q K^T (f16 accumulate, as imp's FA2 fa2_f16acc): B from K rows (n = token), x4 = 2 k-steps.
@@ -339,7 +355,7 @@ struct P2Stream {
 // Claim and load union step k (stage k % P2S_STG) if that stage's previous use is consumed. Warp-collective.
 template <int D, int NW, typename RS>
 __device__ __forceinline__ void p2s_refill(P2Stream& ps, uint8_t* smem, const RS& rs, const uint32_t* whot0, int W,
-                                           int t_end, const Dims& dm, int b, int hk, int lane) {
+                                           const P2Range& rg, const Dims& dm, int b, int hk, int lane) {
   unsigned long long c = 0;
   int tn = -1;
   bool ok = false;
@@ -349,7 +365,7 @@ __device__ __forceinline__ void p2s_refill(P2Stream& ps, uint8_t* smem, const RS
     if (k != P2S_DONE) {
       const uint32_t s = k % P2S_STG, use = k / P2S_STG;
       if (use == 0 || mbar_test((uint32_t)__cvta_generic_to_shared(&ps.empty[s]), (use - 1) & 1)) {
-        tn = next_step<NW, P2Cfg<D>::SUB>(whot0, W, (int)(c >> 32) - 1, t_end);
+        tn = next_step<NW, P2Cfg<D>::SUB>(whot0, W, (int)(c >> 32) - 1, rg);
         const unsigned long long nc = tn < 0 ? (unsigned long long)P2S_DONE
                                              : ((unsigned long long)(tn + 1) << 32) | (k + 1);
         ok = tn >= 0 && atomicCAS(&ps.claim, c, nc) == c;
@@ -382,18 +398,21 @@ __device__ __forceinline__ void p2s_refill(P2Stream& ps, uint8_t* smem, const RS
   asm volatile("cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];" ::"r"(bar) : "memory");
 }
 
-// Pass 2 of q block qb with all NW warps (pass-1 warp w = warp w here). u: union steps of this CTA so far (ring
-// position, same in every thread), advanced by this q block's union length.
+// Pass 2 of q block qb with all NW warps (pass-1 warp w = warp w here), pass-2 segment k of nk: tiles of rg0
+// after pass-1 segment k (nk 1: every tile after all of pass 1). k > 0 continues the state of segment k - 1, k < nk - 1
+// stores it (registers as they are: bitwise the same as one pass), k = nk - 1 merges. u: union steps of this CTA so
+// far (ring position, same in every thread), advanced by this item's union length.
 template <int D, int NW, bool CAUSAL, bool SW, typename T, typename RS>
 __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, T* __restrict__ O, const Dims& dm,
                                           float qmul, const Pass1Out& p1, int b, int hk, int nqb, int qb,
-                                          P2Stream& ps, uint8_t* smem, uint32_t& u) {
+                                          P2Stream& ps, uint8_t* smem, uint32_t& u, const P2Range& rg0, int k,
+                                          int nk) {
   const int bhk = b * dm.Hkv + hk, R = dm.R, G = dm.G, crow0 = qb * NW * 16, tid = threadIdx.x;
   if (crow0 >= R) return;
   const int warp = tid >> 5, lane = tid & 31, T0 = lane & 3, row0 = crow0 + warp * 16;
   const uint32_t* whot0 = p1.warp_hot + (size_t)(bhk * nqb + qb) * NW * p1.W;
   const uint32_t* whot = whot0 + warp * p1.W;
-  const bool valid = row0 < R;
+  const bool valid = row0 < R, last = k == nk - 1;
   const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;
   const int p_cmax = dm.q_offset + (min(crow0 + NW * 16, R) - 1) / G;
   const int r_lo = row0 + (lane >> 2), r_hi = r_lo + 8;
@@ -415,29 +434,46 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
   w.o.zero();
   w.m_lo = w.m_hi = -INFINITY;
   w.l_lo = w.l_hi = 0.f;
-  bool mine_any = false;
+  bool mine_any = false, got = k == 0, step_any = false;  // warp-uniform
+  // state of segments < k: (m, l) per lane, O registers only if the warp had a hot tile (m finite)
+  constexpr int OW = sizeof(w.o.v) / 16;
+  const size_t wt = (size_t)(bhk * nqb + qb) * NW + warp;
+  auto load_state = [&]() {
+    const float4 a = p1.p2ml[wt * 32 + lane];
+    w.m_lo = a.x, w.m_hi = a.y, w.l_lo = a.z, w.l_hi = a.w;
+    mine_any = __any_sync(~0u, a.x != -INFINITY || a.y != -INFINITY);
+    if (mine_any) {
+#pragma unroll
+      for (int i = 0; i < OW; ++i) reinterpret_cast<uint4*>(&w.o.v)[i] = p1.p2o[(wt * OW + i) * 32 + lane];
+    }
+    got = true;
+  };
 
-  if (tid == 0) wait_geq(p1.ready + bhk * nqb + qb, p1.nseg);  // fused launch: pass-1 items may still run
+  if (tid == 0) {  // fused launch: pass-1 items (and earlier pass-2 segments) may still run
+    wait_geq(p1.ready + bhk * nqb + qb, last ? p1.nseg : k + 1);
+    if (k > 0) wait_geq(p1.p2ready + bhk * nqb + qb, k);
+  }
 #ifdef APA_TRACE
   if (tid == 0) g_apa_tw[blockIdx.x & 1023] = gtime();
 #endif
   __syncthreads();
   const int lm_i = lane >> 3, lm_r = lane & 7;
-  const int t_end = min(dm.ntkv, CAUSAL ? p_cmax / BKV + 1 : dm.ntkv);
+  const P2Range rg{rg0.lo, min(rg0.hi, min(dm.ntkv, CAUSAL ? p_cmax / BKV + 1 : dm.ntkv)), rg0.sink};
   const uint32_t sbase = (uint32_t)__cvta_generic_to_shared(smem);
   using P = P2Cfg<D>;
-  for (int t = next_step<NW, P::SUB>(whot0, p1.W, -1, t_end); t >= 0;
-       t = next_step<NW, P::SUB>(whot0, p1.W, t, t_end), ++u) {  // t: step (KV tile at SUB 1)
+  for (int t = next_step<NW, P::SUB>(whot0, p1.W, -1, rg); t >= 0;
+       t = next_step<NW, P::SUB>(whot0, p1.W, t, rg), ++u) {  // t: step (KV tile at SUB 1)
     const uint32_t s = u % P2S_STG, ph = (u / P2S_STG) & 1;
     const uint32_t fb = (uint32_t)__cvta_generic_to_shared(&ps.full[s]);
     for (;;) {  // warp-uniform: lane 0 tests, the warp loads stages meanwhile
       if (__shfl_sync(~0u, lane == 0 ? (int)mbar_test(fb, ph) : 0, 0)) break;
-      p2s_refill<D, NW>(ps, smem, rs, whot0, p1.W, t_end, dm, b, hk, lane);
+      p2s_refill<D, NW>(ps, smem, rs, whot0, p1.W, rg, dm, b, hk, lane);
     }
     mbar_wait(fb, ph);  // acquire in every lane (phase already complete)
     const int j0 = t * P::BT, tt = t / P::SUB;
     if (valid && (!CAUSAL || j0 <= p_wmax) && j0 + P::BT > lb_wmin && ((whot[tt >> 5] >> (tt & 31)) & 1u)) {
-      mine_any = true;
+      if (!got) load_state();
+      mine_any = step_any = true;
       float sc[P::NT][4];
       qk16<D>(sc, qa, sbase + s * P::SMEM, lm_i, lm_r);
       float mx_lo = w.m_lo, mx_hi = w.m_hi;
@@ -446,9 +482,21 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
       pv16<D>(w, sc, sbase + s * P::SMEM + P::BT * P::ROWB, lm_i, lm_r);
     }
     mbar_arrive((uint32_t)__cvta_generic_to_shared(&ps.empty[s]));
-    p2s_refill<D, NW>(ps, smem, rs, whot0, p1.W, t_end, dm, b, hk, lane);
+    p2s_refill<D, NW>(ps, smem, rs, whot0, p1.W, rg, dm, b, hk, lane);
   }
-  if (!valid || !mine_any) return;
+  if (!valid) return;
+  if (!last) {  // segment 0 always stores (the next segment reads it); later ones only a changed state
+    if (k == 0 || step_any) {
+      p1.p2ml[wt * 32 + lane] = make_float4(w.m_lo, w.m_hi, w.l_lo, w.l_hi);
+      if (step_any) {
+#pragma unroll
+        for (int i = 0; i < OW; ++i) p1.p2o[(wt * OW + i) * 32 + lane] = reinterpret_cast<const uint4*>(&w.o.v)[i];
+      }
+    }
+    return;
+  }
+  if (!got) load_state();
+  if (!mine_any) return;
   w.l_lo += __shfl_xor_sync(~0u, w.l_lo, 1);
   w.l_lo += __shfl_xor_sync(~0u, w.l_lo, 2);
   w.l_hi += __shfl_xor_sync(~0u, w.l_hi, 1);
@@ -465,6 +513,13 @@ __device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, 
 #define APA_WIN_SLOTS 2
 #endif
 constexpr int WIN_SLOTS = APA_WIN_SLOTS;
+// 1: pass 2 of segment k runs after pass 1 of segment k + 1 (state carried, bitwise as one pass); 0: all at the end.
+#ifndef APA_P2_SEG
+#define APA_P2_SEG 1
+#endif
+#ifndef APA_P2_EARLY  // segments 0 .. APA_P2_EARLY - 1 get early pass-2 items, the rest goes to the last one
+#define APA_P2_EARLY 1000000
+#endif
 constexpr int WIN_QT = 9;     // tiles per quant item (3 passes of 3 tiles)
 struct Win {
   uint8_t* kv;       // sink tile per (b, kv head), then WIN_SLOTS slots of [bhk][S] tiles
@@ -536,7 +591,7 @@ __device__ __forceinline__ void quant_item(const RS& rs, const Dims& dm, const f
 // quant items of segment 0); past the last pass-1 ticket it runs pass 2 on whole q blocks (pass2_cta). Every
 // wait (quant of k, segment k - 1 of the q block, slot reuse, pass 1 for pass 2) is on an earlier ticket, held by
 // a running CTA: no deadlock. Pass 2 fills the SMs of pass 1's last wave. gate: run only if *gate (redo).
-template <int D, bool CAUSAL, bool SW, typename T, typename RS>
+template <int D, bool CAUSAL, bool SW, bool P2S, typename T, typename RS>
 __global__ void __launch_bounds__(Launch<D>::NW * 32, 1)
     apa_kernel(const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs, const float* __restrict__ Qr,
                const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q,
@@ -545,23 +600,66 @@ __global__ void __launch_bounds__(Launch<D>::NW * 32, 1)
   constexpr int NW = Launch<D>::NW, TILE = Cfg<D>::TILE;
   extern __shared__ __align__(128) uint8_t smem[];
   __shared__ int item_s;
+  __shared__ P2Stream ps;
   if (gate != nullptr && *gate == 0) return;
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (int s = 0; s < P2S_STG; ++s) {
+      mbar_init((uint32_t)__cvta_generic_to_shared(&ps.full[s]), 32);
+      mbar_init((uint32_t)__cvta_generic_to_shared(&ps.empty[s]), NW * 32);
+    }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  uint32_t u = 0;  // pass-2 union steps of this CTA (ring position)
   const int bhkn = dm.B * dm.Hkv, nq = (wn.kv != nullptr && n1 > 0) ? wn.qpb * bhkn : 0;
-  const int n_items = wn.nseg * (nq + n1);
+  const int n2e = P2S && nq > 0 && wn.nseg > 1 ? n1 : 0;  // pass-2 items per segment in the ticket stream
+  const int ne = n2e > 0 ? min(wn.nseg - 1, APA_P2_EARLY) : 0;  // segments with early pass-2 items
+  const int n_items = wn.nseg * (nq + n1) + ne * n2e;
   for (;;) {
     __syncthreads();  // previous item done in every thread: item_s and smem are free
     if (threadIdx.x == 0) item_s = (int)atomicAdd(ticket, 1u);
     __syncthreads();
     const int x = item_s;
     if (x >= n_items) break;
-    // ticket -> item: Q(0) | P(0)[0, n1a) Q(1) P(0)[n1a, n1) | P(1).. Q(2) .. | .. | P(nseg - 1)
+    // ticket -> item: Q(0) | P(0)[0, n1a) Q(1) P(0)[n1a, n1) | P(1).. Q(2) .. P2(0) | .. | P(nseg - 1) P2(nseg - 2);
+    // P2(k): pass 2 of segment k (n2e > 0), after pass 1 of segment k + 1
     const int n1a = WIN_SLOTS >= 3 ? 0 : n1 / 2;
     int k = 0, r = x;
     bool quant = x < nq;
     if (!quant) {
       const int y = x - nq;
-      k = y / (nq + n1);
-      r = y - k * (nq + n1);
+      if (y < nq + n1) {
+        k = 0, r = y;
+      } else {
+        const int y1 = y - (nq + n1), bs = nq + n1 + n2e;
+        if (y1 < ne * bs) {
+          k = 1 + y1 / bs;
+          r = y1 - (k - 1) * bs;
+        } else {
+          const int y2 = y1 - ne * bs;
+          k = 1 + ne + y2 / (nq + n1);
+          r = y2 - (k - 1 - ne) * (nq + n1);
+        }
+      }
+      const int n1k = n1 + (k < wn.nseg - 1 ? nq : 0);
+      if (k <= ne && r >= n1k) {  // P2(k - 1)
+        const int j = r - n1k, jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
+        const int jq = CAUSAL ? nqb - 1 - jx : jx, kk = k - 1;
+#ifdef APA_TRACE
+        const uint64_t t0 = gtime();
+#endif
+        if (threadIdx.x == 0) ps.claim = u;  // next union step u, predecessor -1 (read after pass2_cta's sync)
+        const P2Range rg{seg_lo(kk, dm.ntkv, wn.S), seg_hi(kk, dm.ntkv, wn.S), kk == 0};
+        pass2_cta<D, NW, CAUSAL, SW, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, jq, ps, smem, u, rg, kk, wn.nseg);
+        // publish the carried state: every thread fences, then a release add
+        __threadfence();
+        __syncthreads();
+        if (threadIdx.x == 0) add_release(p1.p2ready + (jb * dm.Hkv + jhk) * nqb + jq, 1);
+#ifdef APA_TRACE
+        trace(t0, g_apa_tw[blockIdx.x & 1023], 2, kk, j);
+#endif
+        continue;
+      }
       quant = k < wn.nseg - 1 && r >= n1a && r < n1a + nq;
       if (quant)
         ++k, r -= n1a;
@@ -613,17 +711,11 @@ __global__ void __launch_bounds__(Launch<D>::NW * 32, 1)
     trace(t0, t1, 1, k, r);
 #endif
   }
-  // pass-2 worker: whole q blocks from ticket[1], all NW warps on one tile stream
-  __shared__ P2Stream ps;
-  if (threadIdx.x == 0) {
-#pragma unroll
-    for (int s = 0; s < P2S_STG; ++s) {
-      mbar_init((uint32_t)__cvta_generic_to_shared(&ps.full[s]), 32);
-      mbar_init((uint32_t)__cvta_generic_to_shared(&ps.empty[s]), NW * 32);
-    }
-    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-  }
-  uint32_t u = 0;
+  // pass-2 worker: whole q blocks from ticket[1], all NW warps on one tile stream; the last pass-2 segment (n2e > 0)
+  // or every tile
+  const int k2 = ne, nk2 = ne + 1;  // segments ne .. nseg - 1
+  const P2Range rg2 = ne > 0 ? P2Range{seg_lo(wn.nseg - 1, dm.ntkv, wn.S), seg_hi(ne, dm.ntkv, wn.S), false}
+                              : P2Range{1, dm.ntkv, true};
   for (const int n2 = nqb * dm.Hkv * dm.B;;) {
     __syncthreads();  // previous q block done in every warp: claim and item_s are free
     if (threadIdx.x == 0) {
@@ -637,9 +729,10 @@ __global__ void __launch_bounds__(Launch<D>::NW * 32, 1)
     const uint64_t t0 = gtime();
 #endif
     const int jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
-    pass2_cta<D, NW, CAUSAL, SW, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem, u);
+    pass2_cta<D, NW, CAUSAL, SW, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem, u, rg2,
+                                    k2, nk2);
 #ifdef APA_TRACE
-    trace(t0, g_apa_tw[blockIdx.x & 1023], 2, 0, j);
+    trace(t0, g_apa_tw[blockIdx.x & 1023], 2, k2, j);
 #endif
   }
 }
