@@ -3676,3 +3676,22 @@ bench/test.sh (`NOBUILD=1`, build/t128b, build/t256b): hd 128 dumps 42 ok, hd 25
 segment = `APA_P2_SEG=0` = `APA_P2_EARLY=1` bitwise on all 4 dumps. All pairs vs FP32 (`full` line), 0.7.0 -> this
 change, min cos / pairs < 0.99: syn_32768_24 0.988997 / 5 -> 0.989082 / 5; syn_122880_24 0.981355 / 4439 -> 0.981427 /
 4429; syn256_32768 0.990454 / 0 -> 0.990431 / 0; syn256_122880 0.983569 / 7920 -> 0.983570 / 7916.
+
+## 2026-10-15 hd 128, 122880 keys: profile after 0.8.0, rejected variants
+
+ncu `--set full`, main fused launch, syn_122880_24, eps 0.005 (4f42be5 code): 7.19 ms under ncu, 384 threads, 168
+registers, 12 warps / SM. Tensor pipe 58.08 % of peak (OMMA pass 1 + HMMA pass 2), issue slots busy 36.27 %, 3.00
+warps / scheduler, 0.54 eligible. Stalls per issue: wait 2.40, math pipe throttle 1.82, selected 1.00, short
+scoreboard 0.60. Samples by opcode (619644): OMMA 26.4 %, HMMA 11.3 %, BRA 5.2 %, MUFU 4.4 %; math throttle samples:
+OMMA 65.0 %, HMMA 30.7 %. Item-end `__syncthreads` of pass1_cta: 11275 samples (1.8 %).
+
+prep + attn ms, mean of 2 (pipeline) / 3 (quant) reps, vs the 0.8.0 build:
+
+| Variant | syn_122880_24 | syn_32768_24 | other |
+|---|---|---|---|
+| QK of step i + 1 before softmax / PV of step i, 12 warps (spills: LDL 67 vs 36) | +69.27 % | +45.08 % | syn256_122880 +27.37 % |
+| same, 8 warps, 8 stages (LDL 15) | +12.74 % | +12.68 % | syn256_122880 +28.10 % |
+| quant: divisions as `__fdividef` (upper bound, not bitwise) | +1.96 % | +1.36 % | sparse 24576 +0.78 % |
+
+Not kept. Both passes run at about the same tensor rate per MMA; no bitwise-preserving lever of 10 % found at this
+shape.
