@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1 (2026-10-16)
+
+- `prep_check` is `[[nodiscard]]` (imp header gate #2211: bool status functions). Kernels SASS-identical to 0.8.0
+  (24 kernels, 0 differ).
+
 ## 0.8.0 (2026-10-15)
 
 - KV window: pass 2 per segment. Pass 2 of segment k is a ticket after pass 1 of segment k + 1 (was: every q block

@@ -178,7 +178,7 @@ inline int prep_stride(const Workspace& w) {
 #endif
 }
 // Sampled stats may miss a key: the KV quantization checks for overflow (exact stats x >= 1 cannot overflow).
-inline bool prep_check(const Workspace& w) {
+[[nodiscard]] inline bool prep_check(const Workspace& w) {
   return APA_PREP_SAMPLE > 0 && (prep_stride(w) > 1 || APA_PREP_HEADROOM < 1.f);
 }
 // Overflow redo, gated on w.ovf: exact stats over all keys.
