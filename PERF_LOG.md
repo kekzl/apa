@@ -3695,3 +3695,39 @@ prep + attn ms, mean of 2 (pipeline) / 3 (quant) reps, vs the 0.8.0 build:
 
 Not kept. Both passes run at about the same tensor rate per MMA; no bitwise-preserving lever of 10 % found at this
 shape.
+
+## 2026-10-17 imp: APA 0.6.1 vs 0.8.1 end to end (kekzl/imp #2759)
+
+Llama-3.2-3B-Instruct Q8_0, prefill 106451 tokens, `--max-seq-len 108000 --max-tokens 1`, RTX 5090. Arms: imp main
+2f959d93 (APA 0.6.1) vs the same tree with 0.8.1 headers. ABBA, 4 reps per arm, mean ms; dense =
+`attention.sparse_prefill_topk_tokens=0`.
+
+| eps | mode | 0.6.1 | 0.8.1 | delta |
+|---|---|---|---|---|
+| 0.01 | sparse | 4559.59 | 4579.93 | +0.45 % |
+| 0.005 | sparse | 4851.48 | 4900.01 | +1.00 % |
+| 0.01 | dense | 6301.67 | 6195.46 | -1.69 % |
+
+Order effect: run 1 vs run 2 of each pair differs by at most 1.89 ms. Sparse eps 0.005: slowest 0.6.1 run 4860.66 <
+fastest 0.8.1 run 4889.75 ms.
+
+nsys kernel sum, sparse eps 0.01, one run per arm, ms:
+
+| Kernels | 0.6.1 | 0.8.1 | delta |
+|---|---|---|---|
+| APA (all) | 2018.37 | 2007.19 | -11.18 |
+| `apa_kernel` | 1808.58 | 1888.40 | +79.82 |
+| `quant_kv_kernel` (fused into the persistent launch in 0.8.1) | 87.07 | 1.85 | -85.22 |
+| `mmq_imma_q8k128` (both variants, SASS identical) | 2152.95 | 2181.54 | +28.59 |
+| all | 4587.87 | 4607.43 | +19.56 |
+
+nvidia-smi every 50 ms, samples above 150 W, sparse eps 0.005, ABBA 4 reps per arm:
+
+| Arm | prefill ms | SM MHz | W | SW power cap (0x4) samples |
+|---|---|---|---|---|
+| 0.6.1 | 4891.04 | 2656.8 | 495.2 | 367 / 446 |
+| 0.8.1 | 4934.65 | 2640.4 | 490.1 | 370 / 464 |
+
+Sparse loss: APA kernels gain, the GEMMs that follow lose; the card sits at the power cap 80 to 82 % of the prefill and
+0.8.1 runs 0.62 % lower SM clock at equal power, about 2/3 of the +0.89 %. Rest (about 0.3 %) not profiled. Kept:
+dense gains, perplexity within 0.004 (imp #2759).
