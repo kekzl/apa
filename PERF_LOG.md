@@ -3752,3 +3752,20 @@ prep + attn ms, 6 reps interleaved, eps 0.005:
 | syn_122880_24 sparse 24576 | 2.388 | 2.367 | -0.90 % |
 | syn256_32768 | 3.393 | 3.365 | -0.84 % |
 | syn256_122880 | 7.051 | 6.966 | -1.20 % |
+
+## 2026-10-18 Sliding window on paged / incremental, eps < 0 merge fix (base abe6994 = 0.8.2)
+
+`APA_SWA=1024,4096,1048576`, eps -1 and 0.005, paged bs 16, chunks of 2048 queries; bad = sampled rows (512) with
+cos < 0.99 or NaN vs a windowed FP32 ref.
+
+| Dump | paged vs flat (differ) | incr = requant bitwise | incr last chunk bad, eps -1 / 0.005 | min cos, w 4096 eps 0.005 |
+|---|---|---|---|---|
+| syn_32768_24 | 0 | 12 of 16 | 0 / 0 | 0.999889 |
+| syn_122880_24 | 0 | 27 of 60 | 0 / 0 | 0.999884 |
+| syn256_32768 | 0 | 12 of 16 | 0 / 0 | 0.999946 |
+| syn256_122880 | 0 | 27 of 60 | 0 / 0 | 0.999940 |
+
+eps -1, syn_32768_24, before the fix: `prefill_incremental` 0 of 16 chunks bitwise equal to full requantization,
+26 (w 4096) / 45 (w 1048576) of 512 sampled rows NaN; flat with `-DAPA_WIN=0` clean. Cause: `merge_row` computed
+`0 * part` with part never written at eps < 0. First fix (M = m2 when l1 = 0, part still read): unchanged, rejected.
+test.sh (NOBUILD, REF = 0.8.2 headers): syn128 66 ok, syn256 64 ok, 0 FAIL; eps 0.005 output bitwise equal to REF.

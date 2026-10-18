@@ -328,14 +328,16 @@ __device__ __forceinline__ void merge_row(const Rows2<D>& w, int half, const Pas
   const size_t qrow = (size_t)(b * dm.Hkv + hk) * p1.rp + r;
   const float m2 = half ? w.m_hi : w.m_lo, l2 = half ? w.l_hi : w.l_lo;
   const float2 ml1 = p1.ml[qrow];
-  const float M = fmaxf(ml1.x, m2);
-  const float w1 = (ml1.y > 0.f) ? ex2(ml1.x - M) : 0.f, w2 = ex2(m2 - M);
+  // l1 = 0 (eps < 0: ml zeroed, part never written): no cold partial, m1 and part are not read
+  const bool cold = ml1.y > 0.f;
+  const float M = cold ? fmaxf(ml1.x, m2) : m2;
+  const float w1 = cold ? ex2(ml1.x - M) : 0.f, w2 = ex2(m2 - M);
   const float inv = 1.f / (w1 * ml1.y + w2 * l2);
   const float* part = p1.part + qrow * D + T0 * 2;
   T* dst = O + (((size_t)b * dm.Sq + r / dm.G) * dm.H + hk * dm.G + r % dm.G) * D + T0 * 2;
 #pragma unroll
   for (int dt = 0; dt < D / 8; ++dt) {
-    const float2 a = *reinterpret_cast<const float2*>(part + dt * 8);
+    const float2 a = cold ? *reinterpret_cast<const float2*>(part + dt * 8) : make_float2(0.f, 0.f);
     const float2 ov = w.o.get(dt, half);
     store2(dst + dt * 8, (w1 * a.x + w2 * ov.x) * inv, (w1 * a.y + w2 * ov.y) * inv);
   }

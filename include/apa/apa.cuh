@@ -500,7 +500,9 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
 template <typename T, typename Reader>
 [[nodiscard]] inline bool prefill_incremental(const T* Q, const Reader& rd, T* O, const Problem& p, float eps,
                                               KvState& st, void* ws, size_t ws_bytes, cudaStream_t s) {
-  if ((p.D != 128 && p.D != 256) || make_dims(p).ntkv > st.cap || ws_bytes < workspace_bytes(p, false)) return false;
+  if ((p.D != 128 && p.D != 256) || !supported(p, KvSource{}) || make_dims(p).ntkv > st.cap ||
+      ws_bytes < workspace_bytes(p, false))
+    return false;
   Workspace w = carve(p, ws, false);
   w.KV = st.KV;
   w.hs = st.hs;

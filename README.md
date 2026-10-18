@@ -173,7 +173,7 @@ Workspace (`workspace_bytes`), 0.7.0 -> 0.8.0: imp bound Sq 4096 Skv 108000 H 24
 | `prefill_paged(Q, k_pool, v_pool, block_table, block_size, k_tail, v_tail, tail, O, p, eps, ws, ws_bytes, stream, win)` | keys `[0, tail)` from a paged FP16 pool, `[tail, Skv)` flat |
 | `prefill_incremental(Q, reader, O, p, eps, st, ws, ws_bytes, stream)` | chunked prefill with a per-layer tile cache (`KvState`, `kv_state_bytes` / `kv_state_carve`); a chunk quantizes only its new keys; K mean and head scales rebuilt when the context grows by `APA_KV_RESTAT` (1.125); lc_122880_2, eps 0.005, all pairs, last chunk: min cos 0.985519, 0 pairs < 0.9 (full requantization per chunk: 0.986760, 0; 0.4.0: 0.821417, 24; 0.3.0: 0.679235, 275); restat chunks bitwise equal to `prefill` |
 | `supported(p, kv)` | shape gate; every entry point returns false when it declines (head dim other than 128 / 256, `window < 0`, or `window > 0` without `causal`) |
-| `Problem::window` | causal sliding window, keys per query (own key included); 0 = full causal; tested on flat K/V (KV window and every tile, q_offset > 0); paged / incremental share the kernel, untested |
+| `Problem::window` | causal sliding window, keys per query (own key included); 0 = full causal; tested on flat K/V (KV window and every tile, q_offset > 0), paged (bitwise = flat) and incremental (bitwise = full requantization at restat chunks; last chunk vs a windowed FP32 ref) |
 
 `eps`: tile share of the running row sum above which a tile is exact; use 0.005 (table above).
 
