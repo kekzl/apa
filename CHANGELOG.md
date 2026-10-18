@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.3 (2026-10-18)
 
 - Fix: eps < 0 (exact baseline) merged pass 2 with the unwritten cold partial (`0 * part`); a workspace holding
   stale non-finite bytes gave NaN rows. `prefill_incremental`, syn_32768_24, eps -1: 26 to 45 of 512 sampled rows NaN
