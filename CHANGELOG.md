@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fix: eps < 0 (exact baseline) merged pass 2 with the unwritten cold partial (`0 * part`); a workspace holding
+  stale non-finite bytes gave NaN rows. `prefill_incremental`, syn_32768_24, eps -1: 26 to 45 of 512 sampled rows NaN
+  -> 0. `merge_row` reads m1 / part only when l1 > 0. Default build, eps 0.005: output bitwise equal to 0.8.2 (hd 128
+  synthetic dumps).
+- Fix: `prefill_incremental` calls `supported()` (declined nothing before: `window < 0`, `H % Hkv != 0`, ...).
+- bench `APA_SWA`: per window, prefill_paged vs flat bitwise, chunked prefill_incremental vs full requantization,
+  window -1 declined by all 3 entry points. test.sh: 6 new checks; syn128 66 ok, syn256 64 ok.
+
 ## 0.8.2 (2026-10-18)
 
 - KV quantization multiplies by the reciprocal of the K / V head scales when they are powers of two (`POW2_SCALES`,

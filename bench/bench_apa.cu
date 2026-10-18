@@ -764,25 +764,39 @@ int main(int argc, char** argv) {
     }
     std::printf("determinism: %zu of %zu output elements differ over 4 reruns\n", diff, 4 * nq);
   }
-  // APA_PAGED=bs: keys [0, off) from a paged pool (blocks shuffled), [off, kv) flat as the tail (imp's chunk);
-  // prefill_paged vs flat prefill (prep + attn) at the last eps.
-  if (const char* e = std::getenv("APA_PAGED")) {
-    const int bs = std::atoi(e), nblk = (off + bs - 1) / bs;
-    const size_t row = (size_t)nkv * hd;
+  // Paged pool of keys [0, off): blocks of bs keys, shuffled unless APA_NOSHUF; [off, kv) stay flat as the tail.
+  const size_t row = (size_t)nkv * hd;
+  struct Pool { T *k, *v; int* bt; int bs; };
+  auto make_pool = [&](int bs) {
+    const int nblk = (off + bs - 1) / bs;
     std::vector<int> bt(nblk);
     for (int i = 0; i < nblk; ++i) bt[i] = i;
     if (!std::getenv("APA_NOSHUF")) std::shuffle(bt.begin(), bt.end(), rng);
-    T *kp, *vp;
-    int* dbt;
-    CK(cudaMalloc(&kp, (size_t)nblk * bs * row * 2));
-    CK(cudaMalloc(&vp, (size_t)nblk * bs * row * 2));
-    CK(cudaMalloc(&dbt, nblk * 4));
-    CK(cudaMemcpy(dbt, bt.data(), nblk * 4, cudaMemcpyHostToDevice));
+    Pool pl{nullptr, nullptr, nullptr, bs};
+    CK(cudaMalloc(&pl.k, (size_t)std::max(nblk, 1) * bs * row * 2));
+    CK(cudaMalloc(&pl.v, (size_t)std::max(nblk, 1) * bs * row * 2));
+    CK(cudaMalloc(&pl.bt, std::max(nblk, 1) * 4));
+    CK(cudaMemcpy(pl.bt, bt.data(), nblk * 4, cudaMemcpyHostToDevice));
     for (int i = 0; i < nblk; ++i) {
       const int n_rows = std::min(bs, off - i * bs);
-      CK(cudaMemcpy(kp + (size_t)bt[i] * bs * row, K + (size_t)i * bs * row, n_rows * row * 2, cudaMemcpyDeviceToDevice));
-      CK(cudaMemcpy(vp + (size_t)bt[i] * bs * row, V + (size_t)i * bs * row, n_rows * row * 2, cudaMemcpyDeviceToDevice));
+      CK(cudaMemcpy(pl.k + (size_t)bt[i] * bs * row, K + (size_t)i * bs * row, n_rows * row * 2,
+                    cudaMemcpyDeviceToDevice));
+      CK(cudaMemcpy(pl.v + (size_t)bt[i] * bs * row, V + (size_t)i * bs * row, n_rows * row * 2,
+                    cudaMemcpyDeviceToDevice));
     }
+    return pl;
+  };
+  auto free_pool = [&](const Pool& pl) {
+    CK(cudaFree(pl.k));
+    CK(cudaFree(pl.v));
+    CK(cudaFree(pl.bt));
+  };
+  // APA_PAGED=bs: prefill_paged (pool + tail) vs flat prefill (prep + attn) at the last eps.
+  if (const char* e = std::getenv("APA_PAGED")) {
+    const Pool pl = make_pool(std::atoi(e));
+    const int bs = pl.bs;
+    const T *kp = pl.k, *vp = pl.v;
+    const int* dbt = pl.bt;
     const float eps = epss.back();
     const float tf = time([&] {
       if (!apa::prefill(Q, K, V, O, p, eps, ws, wsb, 0)) std::exit(2);
@@ -807,9 +821,7 @@ int main(int argc, char** argv) {
     std::printf("paged vs flat: %zu of %zu output elements differ\n", pdiff, nq);
     std::printf("paged bs %d eps %.0e: flat prep+attn %.3f ms cos %.6f min %.6f | paged %.3f ms cos %.6f min %.6f\n",
                 bs, eps, tf, cf, cmin, tp, cp, cmin2);
-    CK(cudaFree(kp));
-    CK(cudaFree(vp));
-    CK(cudaFree(dbt));
+    free_pool(pl);
   }
   // APA_WIN=S (comma list): KV window of S tiles per segment vs every tile quantized ahead (win 0) at the last eps:
   // prefill bitwise, time, workspace.
@@ -905,7 +917,8 @@ int main(int argc, char** argv) {
   }
   // APA_SWA=w (comma list): causal sliding window of w keys per query. Sampled rows vs an FP32 windowed reference at
   // eps -1 (exact) and the last eps; bad = rows with cos < 0.99 or NaN; prefill time vs full causal; w >= kv: bitwise
-  // vs full causal.
+  // vs full causal. Same window, both eps: prefill_paged (APA_PAGED blocks, default 16) vs flat bitwise; kv % n == 0:
+  // chunks of n queries, prefill_incremental vs full requantization bitwise per chunk, last chunk vs the windowed ref.
   if (const char* e = std::getenv("APA_SWA")) {
     const float eps = epss.back();
     const size_t b0 = apa::workspace_bytes(p);
@@ -921,6 +934,43 @@ int main(int argc, char** argv) {
     float* dref;
     CK(cudaMalloc(&dref, (size_t)ns * hd * 4));
     std::vector<float> hw((size_t)ns * hd);
+    auto vs_ref = [&](const std::vector<T>& h, double& cm, int& bad) {  // sampled rows vs hw: cos of all rows
+      double dot = 0, na = 0, nb = 0;
+      cm = 1, bad = 0;
+      for (int i = 0; i < ns; ++i) {
+        double d = 0, x = 0, y = 0;
+        for (int c = 0; c < hd; ++c) {
+          const double a = hw[(size_t)i * hd + c];
+          const double b = __half2float(h[((size_t)rows[i].x * nh + rows[i].y) * hd + c]);
+          d += a * b, x += a * a, y += b * b;
+        }
+        const double c = d / std::sqrt(x * y);
+        cm = std::min(cm, c), bad += !(c >= 0.99), dot += d, na += x, nb += y;
+      }
+      return dot / std::sqrt(na * nb);
+    };
+    auto ndiff = [&](const std::vector<T>& a, const std::vector<T>& b) {
+      size_t df = 0;
+      for (size_t i = 0; i < nq; ++i) df += __half_as_ushort(a[i]) != __half_as_ushort(b[i]);
+      return df;
+    };
+    const char* pe = std::getenv("APA_PAGED");
+    const Pool pl = make_pool(pe != nullptr ? std::atoi(pe) : 16);
+    const int nc = kv % n == 0 ? kv / n : 0;
+    void* sb;
+    CK(cudaMalloc(&sb, apa::kv_state_bytes(1, nkv, hd, kv)));
+    {  // window < 0: every entry point declines
+      apa::Problem pb = p;
+      pb.window = -1;
+      apa::KvState sg = apa::kv_state_carve(sb, 1, nkv, hd, kv);
+      sg.len = sg.stats_len = 0;
+      const int nd = !apa::prefill(Q, K, V, O, pb, eps, ws0, b0, 0) +
+                     !apa::prefill_paged(Q, pl.k, pl.v, pl.bt, pl.bs, K + (size_t)off * row, V + (size_t)off * row,
+                                         off, O, pb, eps, ws0, b0, 0) +
+                     !apa::prefill_incremental(Q, apa::FlatKV<T>{K, V}, O, pb, eps, sg, ws0, b0, 0);
+      std::printf("swa gate: window -1 declined by %d of 3 entry points\n", nd);
+    }
+    std::vector<T> hf(nq), hi(nq);
     for (const char* s = e; *s != '\0';) {
       const int sw = std::atoi(s);
       apa::Problem pw = p;
@@ -936,36 +986,52 @@ int main(int argc, char** argv) {
         CK(cudaMemset(O, 0, nq * 2));
         if (!apa::prefill(Q, K, V, O, pw, ee, ws1, bw, 0)) std::exit(16);
         CK(cudaMemcpy(ho.data(), O, nq * 2, cudaMemcpyDeviceToHost));
-        double dot = 0, na = 0, nb = 0, cm = 1;
-        int bad = 0;
-        for (int i = 0; i < ns; ++i) {
-          double d = 0, x = 0, y = 0;
-          for (int c = 0; c < hd; ++c) {
-            const double a = hw[(size_t)i * hd + c];
-            const double b = __half2float(ho[((size_t)rows[i].x * nh + rows[i].y) * hd + c]);
-            d += a * b, x += a * a, y += b * b;
-          }
-          const double c = d / std::sqrt(x * y);
-          cm = std::min(cm, c), bad += !(c >= 0.99), dot += d, na += x, nb += y;
-        }
+        double cm;
+        int bad;
+        const double cs = vs_ref(ho, cm, bad);
         std::string eq;
-        if (sw >= kv && ee == eps) {
-          size_t df = 0;
-          for (size_t i = 0; i < nq; ++i) df += __half_as_ushort(h0[i]) != __half_as_ushort(ho[i]);
-          eq = " | vs causal: " + std::to_string(df) + " of " + std::to_string(nq) + " differ";
-        }
+        if (sw >= kv && ee == eps)
+          eq = " | vs causal: " + std::to_string(ndiff(h0, ho)) + " of " + std::to_string(nq) + " differ";
         const float t1 = time([&] {
           if (!apa::prefill(Q, K, V, O, pw, ee, ws1, bw, 0)) std::exit(16);
         });
         std::printf("swa %d eps %.0e: cos %.6f min %.6f bad %d of %d | prefill %.3f ms (causal eps %.0e: %.3f, %.2fx) "
                     "| pairs %.1f %%%s\n",
-                    sw, ee, dot / std::sqrt(na * nb), cm, bad, ns, t1, eps, t0, t0 / t1, 100.0 * sp / pairs,
-                    eq.c_str());
+                    sw, ee, cs, cm, bad, ns, t1, eps, t0, t0 / t1, 100.0 * sp / pairs, eq.c_str());
+        CK(cudaMemset(O, 0, nq * 2));
+        if (!apa::prefill_paged(Q, pl.k, pl.v, pl.bt, pl.bs, K + (size_t)off * row, V + (size_t)off * row, off, O, pw,
+                                ee, ws1, bw, 0))
+          std::exit(17);
+        CK(cudaMemcpy(hf.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+        std::printf("swa %d eps %.0e paged bs %d vs flat: %zu of %zu differ\n", sw, ee, pl.bs, ndiff(ho, hf), nq);
+        if (nc == 0) continue;
+        apa::KvState st = apa::kv_state_carve(sb, 1, nkv, hd, kv);
+        st.len = st.stats_len = 0;
+        const apa::FlatKV<T> rd{K, V};
+        int neq = 0;
+        for (int c = 0; c < nc; ++c) {
+          apa::Problem pc = pw;
+          pc.Skv = (c + 1) * n;
+          pc.q_offset = pc.Skv - n;
+          if (!apa::prefill(Q, K, V, O, pc, ee, ws1, bw, 0)) std::exit(18);
+          CK(cudaMemcpy(hf.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+          if (!apa::prefill_incremental(Q, rd, O, pc, ee, st, ws1, bw, 0)) std::exit(19);
+          CK(cudaMemcpy(hi.data(), O, nq * 2, cudaMemcpyDeviceToHost));
+          neq += ndiff(hf, hi) == 0;
+        }
+        std::printf("swa %d eps %.0e chunks %d x %d: incr = requant bitwise %d of %d", sw, ee, nc, n, neq, nc);
+        if (off == kv - n) {  // last chunk = the dump's problem
+          const double ci = vs_ref(hi, cm, bad);
+          std::printf(" | incr last chunk cos %.6f min %.6f bad %d of %d", ci, cm, bad, ns);
+        }
+        std::printf("\n");
       }
       CK(cudaFree(ws1));
       while (*s != '\0' && *s != ',') ++s;
       if (*s == ',') ++s;
     }
+    CK(cudaFree(sb));
+    free_pool(pl);
     CK(cudaFree(dref));
     CK(cudaFree(ws0));
   }
