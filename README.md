@@ -65,6 +65,16 @@ APA 0.6.0 and 0.6.1: kekzl/imp#2650 (imp base 18f0427b), 4 reps interleaved, mea
 | 0.6.0 | 0.005 | 5304.72 (5295.11 .. 5313.77) | 7405.02 (7201.78 .. 7548.80) |
 | 0.6.1 | 0.005 | 5296.91 (5286.44 .. 5305.39) | 7322.87 (7164.59 .. 7512.30) |
 
+APA 0.6.1 vs 0.8.1: kekzl/imp#2759 (imp base 2f959d93), ABBA, 4 reps per arm, mean (min .. max). 0.8.2 is bitwise
+equal to 0.8.1. Sparse loss: SASS-identical GEMMs run after APA at 0.62 % lower SM clock (power cap, PERF_LOG.md).
+
+| APA | eps | default (sparse prefill) | dense (`sparse_prefill_topk_tokens=0`) |
+|---|---|---|---|
+| 0.6.1 | 0.01 | 4559.59 (4544.95 .. 4567.88) | 6301.67 (6288.24 .. 6321.93) |
+| 0.8.1 | 0.01 | 4579.93 (4572.62 .. 4589.87) | 6195.46 (6185.45 .. 6207.54) |
+| 0.6.1 | 0.005 | 4851.48 (4842.84 .. 4860.66) | |
+| 0.8.1 | 0.005 | 4900.01 (4889.75 .. 4909.86) | |
+
 Earlier runs, 2 reps (rep 1 / rep 2); FA2 and 0.4.0: kekzl/imp#2646, 0.5.0: kekzl/imp#2648:
 
 | Attention | eps | default (sparse prefill) | dense (`sparse_prefill_topk_tokens=0`) |
@@ -83,6 +93,7 @@ Perplexity, corpus `ppl_corpus_45k_gemma4_turn.txt` (below), Qwen3-8B Q8_0 (1403
 | 0.5.0 | 10.7972 / 17.3679 | 10.8071 / 17.3663 |
 | 0.6.0 | 10.7971 / 17.3704 | 10.7965 / 17.3655 |
 | 0.6.1 | 10.7953 / 17.3663 | 10.8032 / 17.3690 |
+| 0.8.1 (= 0.8.2) | 10.7982 / 17.3663 | 10.8007 / 17.3654 |
 
 APA e71624b (0.3.0), default sparse prefill, `apa_min_kv 8192`, mean of 2, prefill ms:
 

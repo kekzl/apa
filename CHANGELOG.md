@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2 (2026-10-18)
+
+- KV quantization multiplies by the reciprocal of the K / V head scales when they are powers of two (`POW2_SCALES`,
+  sampled stats, default); exact stats (`APA_PREP_SAMPLE=0`) still divide. Raw O bitwise equal to 0.8.1 (5 synthetic
+  dumps, hd 128 and 256); `APA_PREP_SAMPLE=0` build 24 of 24 kernels SASS-identical. prep + attn, 6 reps, eps 0.005:
+  -0.35 to -1.20 %.
+- `APA_VERSION_MINOR/PATCH` were still 0.6.1 in 0.7.0 to 0.8.1; now 0.8.2. `APA_PREP_SAMPLE` default moves to
+  `apa_common.cuh`.
+
 ## 0.8.1 (2026-10-16)
 
 - `prep_check` is `[[nodiscard]]` (imp header gate #2211: bool status functions). Kernels SASS-identical to 0.8.0
