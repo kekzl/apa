@@ -11,8 +11,14 @@
 #include <cstdint>
 #include <cstdio>
 
+#ifndef APA_PREP_SAMPLE  // stats chunks sampled (apa.cuh prep_d); 0: exact stats
+#define APA_PREP_SAMPLE 16
+#endif
+
 namespace apa {
 
+// Sampled stats round the K / V head scales up to powers of two: x * (1 / s) == x / s bitwise.
+constexpr bool POW2_SCALES = APA_PREP_SAMPLE > 0;
 constexpr int BKV = 64;                 // tokens per KV tile
 constexpr int STATS_TILES = 16;         // KV tiles per stats_kernel block (one K column-sum chunk)
 constexpr float P_SCALE = 448.f * 6.f;  // global scales map |x| max to E2M1 6 * UE4M3 448

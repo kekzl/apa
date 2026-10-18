@@ -151,9 +151,7 @@ inline size_t workspace_bytes(const Problem& p, bool own_kv = true, int win = WI
 // Prep (stats + KV blobs + Q packing) only; attn() consumes the workspace. Stats read every stride-th 1024-key chunk
 // (>= APA_PREP_SAMPLE chunks; 0: all chunks, exact head scales). Head scales x4, rounded up to powers of two (as the
 // KvState: equal tiles at restats). A 16-block past the UE4M3 range sets ovf: exact stats + every tile again, gated.
-#ifndef APA_PREP_SAMPLE
-#define APA_PREP_SAMPLE 16
-#endif
+// APA_PREP_SAMPLE default: apa_common.cuh.
 #ifndef APA_KV_HEADROOM  // head scales x this: later keys (KvState) or unsampled chunks up to 4x the seen maxima
 #define APA_KV_HEADROOM 4.f
 #endif

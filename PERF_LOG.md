@@ -3731,3 +3731,24 @@ nvidia-smi every 50 ms, samples above 150 W, sparse eps 0.005, ABBA 4 reps per a
 Sparse loss: APA kernels gain, the GEMMs that follow lose; the card sits at the power cap 80 to 82 % of the prefill and
 0.8.1 runs 0.62 % lower SM clock at equal power, about 2/3 of the +0.89 %. Rest (about 0.3 %) not profiled. Kept:
 dense gains, perplexity within 0.004 (imp #2759).
+
+## 2026-10-18 KV quantization: multiply by the reciprocal of the power-of-two head scales (base c616972 = 0.8.1)
+
+Sampled stats (`APA_PREP_SAMPLE` > 0, default 16) already round kg / vg up to powers of two, so `x * (1 / s)` equals
+`x / s` bitwise; `quant_tile` now multiplies (`POW2_SCALES`), exact stats (`APA_PREP_SAMPLE=0`) still divide.
+
+- SASS: hd 128 flat kernel 12160 -> 11272 instructions, LDL / STL unchanged; `APA_PREP_SAMPLE=0` build 24 of 24
+  kernels identical.
+- Raw O (APA_OUT, eps 0.005) vs 0.8.1: bitwise equal on syn_32768_24, syn_122880_24, syn_122880_24 sparse 24576,
+  syn256_32768, syn256_122880.
+
+prep + attn ms, 6 reps interleaved, eps 0.005:
+
+| Case | 0.8.1 | multiply | delta |
+|---|---|---|---|
+| syn_32768_24 | 2.492 | 2.483 | -0.35 % |
+| syn_65536_32 | 4.813 | 4.760 | -1.08 % |
+| syn_122880_24 | 5.687 | 5.632 | -0.96 % |
+| syn_122880_24 sparse 24576 | 2.388 | 2.367 | -0.90 % |
+| syn256_32768 | 3.393 | 3.365 | -0.84 % |
+| syn256_122880 | 7.051 | 6.966 | -1.20 % |

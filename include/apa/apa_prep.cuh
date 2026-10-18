@@ -201,6 +201,7 @@ __device__ __forceinline__ float quant_tile(const Reader& rd, const Dims& dm, co
                                             __half (*vt)[D + 2]) {  // V / vg (|x| <= 2688 fits FP16)
   using C = Cfg<D>;
   constexpr int NG = BKV * C::G16;  // groups per tile and phase
+  const float ik = 1.f / kg, iv = 1.f / vg;  // used when POW2_SCALES (bitwise equal to the division)
   float amx = 0.f;
   for (int pp = tid; pp < nb * NG; pp += nthr) {
     const int ti = pp / NG, p = pp % NG, r = p / C::G16, g = p % C::G16, s = (tile0 + ti) * BKV + r;
@@ -215,12 +216,12 @@ __device__ __forceinline__ float quant_tile(const Reader& rd, const Dims& dm, co
       for (int i = 0; i < 16; ++i) x[i] = 0.f;
     }
 #pragma unroll
-    for (int i = 0; i < 16; ++i) vt[ti * BKV + r][g * 16 + i] = __float2half(x[i] / vg);
+    for (int i = 0; i < 16; ++i) vt[ti * BKV + r][g * 16 + i] = __float2half(POW2_SCALES ? x[i] * iv : x[i] / vg);
     // ---- K (token row r, swizzled 16 B chunk g>>1, half g&1)
     if (s < dm.Skv) {
       rd.load16(false, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
-      for (int i = 0; i < 16; ++i) x[i] = (x[i] - kmean[g * 16 + i]) / kg;
+      for (int i = 0; i < 16; ++i) x[i] = POW2_SCALES ? (x[i] - kmean[g * 16 + i]) * ik : (x[i] - kmean[g * 16 + i]) / kg;
     } else {
 #pragma unroll
       for (int i = 0; i < 16; ++i) x[i] = 0.f;
